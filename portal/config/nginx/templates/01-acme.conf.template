@@ -1,0 +1,9 @@
+# ACME challenge endpoint for certbot (HTTP-01)
+server {
+    listen 80;
+    server_name ${DOMAIN} *.${DOMAIN};
+    location /.well-known/acme-challenge/ {
+        root /var/lib/letsencrypt;
+    }
+    location / { return 444; }
+}

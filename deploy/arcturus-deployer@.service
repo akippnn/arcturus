@@ -1,0 +1,21 @@
+[Unit]
+Description=Arcturus host deployment API on %I
+After=network-online.target arcturus-podman-api.service arcturus-registry.service
+Wants=network-online.target arcturus-podman-api.service arcturus-registry.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/arcturus-deployer/current
+EnvironmentFile=%h/.config/arcturus/deployer.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/share/arcturus-deployer/current/venv/bin/python -m uvicorn app:app --host %I --port 9090 --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/arcturus-deployer %h/.config/containers/systemd/arcturus %h/.config/systemd/user %t/arcturus
+
+[Install]
+WantedBy=default.target

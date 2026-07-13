@@ -1,0 +1,3 @@
+# Stream configs for TCP/UDP services will be placed here by the deploy service
+# This file exists to prevent nginx error on empty directory
+stream {}

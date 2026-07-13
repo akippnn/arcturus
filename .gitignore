@@ -1,0 +1,43 @@
+# Local environment and editor files
+.env
+.env.swp
+*.swp
+
+# Build and language output
+temp/
+node_modules/
+dist/
+__pycache__/
+*.pyc
+
+# Certificates and provider credentials
+portal/data/certbot/cloudflare.ini
+portal/data/certbot/conf/
+
+# CrowdSec-generated credentials and state
+portal/config/crowdsec/config/*
+!portal/config/crowdsec/config/.gitkeep
+portal/config/crowdsec/data/*
+!portal/config/crowdsec/data/.gitkeep
+
+# Generated ingress and log data
+portal/config/nginx/vhosts.d/*
+!portal/config/nginx/vhosts.d/.gitkeep
+portal/config/nginx/streams.d/*
+!portal/config/nginx/streams.d/.gitkeep
+portal/data/nginx-logs/*
+!portal/data/nginx-logs/.gitkeep
+
+# Runner registration and runtime data
+runners/container-data/*
+!runners/container-data/.gitkeep
+runners/container-data/**/.runner
+.runner-data/
+
+# Terraform working state
+**/.terraform/
+terraform-modules/**/.terraform_generated/
+terraform-modules/**/.terraform.lock.hcl
+
+# Generated public keys and local state
+*.pub

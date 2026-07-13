@@ -1,0 +1,19 @@
+[Unit]
+Description=Arcturus nginx route publisher
+After=arcturus-registry.service
+Wants=arcturus-registry.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/arcturus/platform.env
+ExecStart=/usr/bin/node %h/.local/share/arcturus-deployer/current/modules/router/dist/index.js
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/arcturus %h/stacks
+
+[Install]
+WantedBy=default.target

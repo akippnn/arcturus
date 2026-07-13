@@ -1,0 +1,51 @@
+# Optional legacy portal example. Supply immutable image references in .env.
+# The Arcturus application control plane only publishes routing metadata; TLS
+# and public ingress remain operator-owned infrastructure.
+networks:
+  default:
+    name: internal_routing
+    external: true
+
+services:
+  nginx:
+    image: ${NGINX_IMAGE:?set NGINX_IMAGE to an image@sha256 digest}
+    container_name: portal-nginx
+    security_opt:
+      - label:disable
+    environment:
+      DOMAIN: ${DOMAIN:-example.org}
+      CONTAINER_DNS_RESOLVER: ${CONTAINER_DNS_RESOLVER:?set CONTAINER_DNS_RESOLVER to the Podman network DNS address}
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./config/nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+      - ./config/nginx/templates:/etc/nginx/templates:ro
+      - ./config/nginx/vhosts.d:/etc/nginx/vhosts.d:ro
+      - ./config/nginx/streams.d:/etc/nginx/streams.d:ro
+      - ./data/nginx-logs:/var/log/nginx:rw
+      - ./data/certbot/conf:/etc/letsencrypt:ro
+    command: >-
+      /bin/sh -c 'envsubst '"'"'$${CONTAINER_DNS_RESOLVER}'"'"' < /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g "daemon off;"'
+    restart: unless-stopped
+
+  certbot:
+    image: ${CERTBOT_IMAGE:?set CERTBOT_IMAGE to an image@sha256 digest}
+    container_name: portal-certbot
+    volumes:
+      - ./data/certbot/conf:/etc/letsencrypt:rw
+      - ./data/certbot/cloudflare.ini:/cloudflare.ini:ro
+    entrypoint: >-
+      /bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done'
+    restart: unless-stopped
+
+  crowdsec:
+    image: ${CROWDSEC_IMAGE:?set CROWDSEC_IMAGE to an image@sha256 digest}
+    container_name: portal-crowdsec
+    environment:
+      COLLECTIONS: crowdsecurity/sshd crowdsecurity/linux crowdsecurity/nginx
+    volumes:
+      - ./config/crowdsec/config:/etc/crowdsec:Z
+      - ./config/crowdsec/data:/var/lib/crowdsec/data:Z
+      - ./data/nginx-logs:/var/log/nginx:ro,Z
+    restart: unless-stopped

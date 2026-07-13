@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+state_dir="${ARCTURUS_STATE_DIR:-$HOME/.local/share/arcturus-deployer}"
+python="$state_dir/current/venv/bin/python3"
+[[ -x "$python" ]] || python="$state_dir/venv/bin/python3"
+script="$state_dir/current/arcturusctl.py"
+[[ -f "$script" ]] || script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/arcturusctl.py"
+exec "$python" "$script" "$@"

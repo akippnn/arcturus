@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /modules/bus
+    schedule:
+      interval: monthly
+  - package-ecosystem: npm
+    directory: /modules/registry
+    schedule:
+      interval: monthly
+  - package-ecosystem: npm
+    directory: /modules/router
+    schedule:
+      interval: monthly
+  - package-ecosystem: pip
+    directory: /deploy
+    schedule:
+      interval: monthly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

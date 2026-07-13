@@ -1,0 +1,21 @@
+{
+  "name": "arcturus-registry",
+  "version": "0.99.0-rc.1",
+  "description": "Arcturus Registry Module - discovers and validates stack manifests",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0"
+  },
+  "private": true
+}

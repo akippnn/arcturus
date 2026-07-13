@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a focused platform capability
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operational problem
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and tradeoffs
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Manifest, migration, security, and rollback impact

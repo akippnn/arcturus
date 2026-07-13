@@ -1,0 +1,32 @@
+# Deprecated compatibility example. New application releases use the
+# manifest-driven deployment API and rootless Quadlets, not this Compose file.
+services:
+  deploy:
+    build: .
+    container_name: arcturus-deploy-legacy
+    env_file:
+      - .env
+    environment:
+      STACKS_BASE_DIR: /data/stacks
+      PORTAL_VHOSTS_DIR: /data/portal/vhosts.d
+      PORTAL_STREAMS_DIR: /data/portal/streams.d
+      CERT_DOMAIN: ${CERT_DOMAIN:-example.org}
+      ARCTURUS_APEX_SERVICE: ${ARCTURUS_APEX_SERVICE:-}
+      NGINX_CONTAINER: ${NGINX_CONTAINER:-portal-nginx}
+      ARCTURUS_V2_STATE_DB: /data/state/state.sqlite3
+    volumes:
+      - ${ARCTURUS_LEGACY_STACKS_DIR:-./legacy-stacks}:/data/stacks
+      - ${ARCTURUS_VHOSTS_DIR:-../portal/config/nginx/vhosts.d}:/data/portal/vhosts.d
+      - ${ARCTURUS_STREAMS_DIR:-../portal/config/nginx/streams.d}:/data/portal/streams.d
+      - ${ARCTURUS_STATE_DIR:-./state}:/data/state
+      - ${PODMAN_SOCKET:-/run/user/1000/arcturus/podman.sock}:/var/run/docker.sock
+    security_opt:
+      - label:disable
+    networks:
+      - internal_routing
+    restart: unless-stopped
+
+networks:
+  internal_routing:
+    name: internal_routing
+    external: true

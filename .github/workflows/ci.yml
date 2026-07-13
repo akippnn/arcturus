@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: deploy/requirements.txt
+      - name: Install runtime dependencies
+        run: python -m pip install --requirement deploy/requirements.txt
+      - name: Compile and test control plane
+        env:
+          PYTHONPATH: deploy
+          CERT_DOMAIN: example.org
+        run: |
+          python -m compileall -q deploy
+          python -W error::ResourceWarning -m unittest discover -s deploy/tests -v
+
+  node:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [bus, registry, router]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: modules/${{ matrix.module }}/package-lock.json
+      - name: Install and build
+        run: |
+          npm --prefix "modules/${{ matrix.module }}" ci
+          npm --prefix "modules/${{ matrix.module }}" run build
+      - name: Test router
+        if: matrix.module == 'router'
+        run: npm --prefix modules/router test
+      - name: Audit production dependencies
+        run: npm --prefix "modules/${{ matrix.module }}" audit --audit-level=low
+
+  source-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Shell syntax
+        run: bash -n deploy/install-host.sh deploy/arcturusctl deploy/build-bundle.sh
+      - name: Validate package metadata and examples
+        run: |
+          python -m json.tool modules/bus/package.json >/dev/null
+          python -m json.tool modules/registry/package.json >/dev/null
+          python -m json.tool modules/router/package.json >/dev/null
+      - name: Validate local Markdown links
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          roots = [Path('README.md'), Path('CONTRIBUTING.md'), Path('SECURITY.md'), *Path('docs').rglob('*.md')]
+          broken = []
+          for document in roots:
+              text = document.read_text(encoding='utf-8')
+              for target in re.findall(r'\[[^]]+\]\(([^)]+)\)', text):
+                  if target.startswith(('http://', 'https://', 'mailto:', '#')):
+                      continue
+                  path = target.split('#', 1)[0]
+                  if path and not (document.parent / path).resolve().exists():
+                      broken.append(f'{document}: {target}')
+          if broken:
+              raise SystemExit('Broken Markdown links:\n' + '\n'.join(broken))
+          PY
+      - name: Check public-tree hygiene
+        run: |
+          set -euo pipefail
+          test ! -e deploy/.env
+          test ! -d docs/internal
+          ! find . -type f \( -name '*.log' -o -name '*.tfstate' -o -name '*.sqlite' -o -name '*.pem' -o -name '*.key' \) -print -quit | grep -q .

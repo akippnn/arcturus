@@ -1,0 +1,34 @@
+name: Publish Arcturus control-plane bundle
+
+on:
+  push:
+    tags: ['arcturus-v*']
+  workflow_dispatch:
+
+concurrency:
+  group: publish-arcturus-control-plane
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: ${{ vars.ARCTURUS_BUNDLE_REPOSITORY }}
+  REGISTRY_HOST: ${{ vars.ARCTURUS_REGISTRY_HOST }}
+
+jobs:
+  publish:
+    if: ${{ vars.ARCTURUS_BUNDLE_REPOSITORY != '' && vars.ARCTURUS_REGISTRY_HOST != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test control plane
+        run: buildah bud --layers --target test --file deploy/Containerfile.bundle --tag localhost/arcturus-control-plane-test:${{ github.sha }} .
+      - name: Registry login
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | buildah login --username "$REGISTRY_USER" --password-stdin "$REGISTRY_HOST"
+      - name: Publish immutable bundle
+        run: ./deploy/build-bundle.sh "$IMAGE_REPOSITORY:${{ github.sha }}" arcturus-bundle.digest
+      - name: Report pinned reference
+        run: |
+          digest="$(tr -d '[:space:]' < arcturus-bundle.digest)"
+          printf '%s@%s\n' "$IMAGE_REPOSITORY" "$digest"

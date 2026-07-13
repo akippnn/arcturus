@@ -1,0 +1,40 @@
+FROM node:22-alpine AS platform-build
+
+WORKDIR /build
+COPY modules ./modules
+RUN for module in bus registry router; do \
+      cd "/build/modules/$module"; npm ci; npm run build; \
+    done \
+    && node -e "Promise.all([import('/build/modules/bus/dist/bus.js'), import('/build/modules/registry/dist/schema.js'), import('/build/modules/router/dist/router.js')])"
+
+FROM quay.io/almalinuxorg/almalinux:9 AS base
+
+RUN dnf install -y python3.12 python3.12-pip && dnf clean all
+WORKDIR /opt/arcturus/deploy
+COPY deploy/requirements.txt ./
+RUN mkdir -p wheelhouse \
+    && python3.12 -m pip wheel --wheel-dir wheelhouse --requirement requirements.txt \
+    && python3.12 -m pip install --no-index --find-links wheelhouse --requirement requirements.txt
+COPY deploy/app.py deploy/release.py deploy/arcturusctl.py deploy/arcturusctl deploy/install-host.sh \
+     deploy/arcturus-deployer@.service deploy/arcturus-podman-api.service \
+     deploy/arcturus-bus.service deploy/arcturus-registry.service deploy/arcturus-router.service ./
+COPY --from=platform-build /build/modules/bus/dist /opt/arcturus/modules/bus/dist
+COPY --from=platform-build /build/modules/bus/package.json /opt/arcturus/modules/bus/package.json
+COPY --from=platform-build /build/modules/router/dist /opt/arcturus/modules/router/dist
+COPY --from=platform-build /build/modules/router/package.json /opt/arcturus/modules/router/package.json
+COPY --from=platform-build /build/modules/registry/dist /opt/arcturus/modules/registry/dist
+COPY --from=platform-build /build/modules/registry/package.json /opt/arcturus/modules/registry/package.json
+COPY --from=platform-build /build/modules/registry/node_modules/zod /opt/arcturus/modules/registry/node_modules/zod
+RUN chmod 0755 arcturusctl.py arcturusctl install-host.sh
+
+FROM base AS test
+COPY deploy/tests ./tests
+COPY deploy/build-bundle.sh ./
+RUN bash -n install-host.sh arcturusctl build-bundle.sh \
+    && python3.12 -m py_compile app.py release.py arcturusctl.py \
+    && CERT_DOMAIN=example.org python3.12 -m unittest discover -s tests -v \
+    && python3.12 -m pip install pip-audit \
+    && python3.12 -m pip_audit --requirement requirements.txt
+
+FROM base AS runtime
+ENTRYPOINT ["python3.12", "/opt/arcturus/deploy/arcturusctl.py"]

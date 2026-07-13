@@ -1,0 +1,31 @@
+name: Legacy Terraform validation
+
+on:
+  push:
+    paths:
+      - 'terraform-modules/**'
+      - '.github/workflows/legacy-terraform.yml'
+  pull_request:
+    paths:
+      - 'terraform-modules/**'
+      - '.github/workflows/legacy-terraform.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+      - name: Format and validate compatibility modules
+        run: |
+          set -euo pipefail
+          for module in terraform-modules/arcturus-deploy terraform-modules/arcturus-host; do
+            terraform -chdir="$module" fmt -check -recursive
+            terraform -chdir="$module" init -backend=false -input=false
+            terraform -chdir="$module" validate
+          done

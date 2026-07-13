@@ -1,0 +1,14 @@
+[Unit]
+Description=Always-on rootless Podman API for Arcturus
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mkdir -p %t/arcturus
+ExecStart=/usr/bin/podman system service --time=0 unix://%t/arcturus/podman.sock
+ExecStopPost=/usr/bin/rm -f %t/arcturus/podman.sock
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=default.target

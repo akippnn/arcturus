@@ -1,0 +1,4 @@
+# Certbot Cloudflare DNS challenge credentials.
+# Copy this file to cloudflare.ini on the host and fill in the token there.
+# Never commit a filled cloudflare.ini file.
+dns_cloudflare_api_token = CHANGE_ME

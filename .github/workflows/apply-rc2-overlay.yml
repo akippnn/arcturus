@@ -1,0 +1,31 @@
+name: Apply RC2 overlay
+
+on:
+  push:
+    branches: [agent/replayable-host-updates]
+    paths:
+      - '.github/rc2-patches/**'
+      - '.github/workflows/apply-rc2-overlay.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Apply reviewed RC2 patches
+        run: |
+          set -euo pipefail
+          for patch in .github/rc2-patches/*.patch; do
+            git apply --index --whitespace=nowarn "$patch"
+          done
+          rm -rf .github/rc2-patches .github/workflows/apply-rc2-overlay.yml
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: align rc2 deployment compatibility'
+          git push origin HEAD:agent/replayable-host-updates

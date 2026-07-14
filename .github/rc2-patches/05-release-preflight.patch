@@ -1,0 +1,100 @@
+diff --git a/deploy/release.py b/deploy/release.py
+index df55761..439f7f4 100644
+--- a/deploy/release.py
++++ b/deploy/release.py
+@@ -486,6 +486,27 @@ class PodmanClient:
+                 )
+             return response.json()
+ 
++    def _resource_exists(self, path: str) -> bool:
++        with self._client(30) as client:
++            response = client.get(path)
++            if response.status_code == 404:
++                return False
++            if response.status_code >= 400:
++                raise RuntimeError(
++                    f"Podman resource inspection failed ({response.status_code}): "
++                    f"{redact(response.text)}"
++                )
++            return True
++
++    def secret_exists(self, name: str) -> bool:
++        return self._resource_exists(f"/secrets/{quote(name, safe='')}/json")
++
++    def volume_exists(self, name: str) -> bool:
++        return self._resource_exists(f"/volumes/{quote(name, safe='')}/json")
++
++    def network_exists(self, name: str) -> bool:
++        return self._resource_exists(f"/networks/{quote(name, safe='')}/json")
++
+     def list_containers(self) -> list[dict[str, Any]]:
+         with self._client(30) as client:
+             response = client.get("/containers/json", params={"all": "true"})
+@@ -917,9 +938,16 @@ class QuadletRenderer:
+ 
+ 
+ class DeploymentFailure(RuntimeError):
+-    def __init__(self, message: str, *, rollback: dict[str, Any]):
++    def __init__(
++        self,
++        message: str,
++        *,
++        rollback: dict[str, Any],
++        deployment_id: str | None = None,
++    ):
+         super().__init__(message)
+         self.rollback = rollback
++        self.deployment_id = deployment_id
+         self.rollback_succeeded = rollback.get("status") in {"succeeded", "not_required"}
+ 
+ 
+@@ -1025,6 +1053,7 @@ class ReleaseDeployer:
+                 previous, request.manifest
+             )
+             try:
++                self.preflight(request.manifest)
+                 images = self._pull_and_verify(request.manifest)
+                 units = self.renderer.render(request.manifest, quadlets)
+                 self._validate_quadlets(quadlets)
+@@ -1088,8 +1117,41 @@ class ReleaseDeployer:
+                 raise DeploymentFailure(
+                     error["message"],
+                     rollback=rollback,
++                    deployment_id=deployment_id,
+                 ) from exc
+ 
++    def preflight(self, manifest: ServiceRelease) -> dict[str, Any]:
++        secret_names = sorted(
++            {secret.name for component in manifest.spec.components.values() for secret in component.secrets}
++        )
++        external_volumes = sorted(
++            {
++                volume.source
++                for component in manifest.spec.components.values()
++                for volume in component.volumes
++                if volume.type == "volume" and volume.external
++            }
++        )
++        external_networks = sorted(network.name for network in manifest.spec.networks if network.external)
++        missing = {
++            "secrets": [name for name in secret_names if not self.podman.secret_exists(name)],
++            "volumes": [name for name in external_volumes if not self.podman.volume_exists(name)],
++            "networks": [name for name in external_networks if not self.podman.network_exists(name)],
++        }
++        missing = {kind: names for kind, names in missing.items() if names}
++        if missing:
++            details = "; ".join(f"{kind}={','.join(names)}" for kind, names in missing.items())
++            raise RuntimeError(f"host prerequisites missing: {details}")
++        return {
++            "status": "ready",
++            "service": manifest.metadata.name,
++            "checked": {
++                "secrets": secret_names,
++                "volumes": external_volumes,
++                "networks": external_networks,
++            },
++        }
++
+     def get(self, deployment_id: str) -> dict[str, Any] | None:
+         record = self.store.get(deployment_id)
+         return self._response_with_routing(record) if record else None

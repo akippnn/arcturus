@@ -18,6 +18,7 @@ Arcturus deliberately targets the space between hand-maintained Compose deployme
 - Podman secret references without embedding secret values in manifests
 - Active-manifest publication for the registry/router
 - A project bootstrap repository for web, worker, scheduled, and multi-component services
+- Replayable, recorded host and project update workflows
 
 Arcturus does **not** build images on the production host, deploy floating tags, let Watchtower replace releases, or require Terraform/Compose for normal application updates.
 
@@ -58,16 +59,32 @@ sudo -iu appsvc ./deploy/install-host.sh \
   --allowed-bind-root /home/appsvc/apps
 ```
 
-Review the resolved installation with `--dry-run`, then rerun without those flags. Remote deployment listeners should use a private address and a source-scoped firewall rule; loopback is the default.
+Review the resolved installation with `--dry-run`. For the actual installation, use the replayable wrapper with the same persistent host arguments:
 
-Full instructions: [Host installation](docs/host-installation.md).
+```bash
+sudo -iu appsvc ./deploy/arcturus-host-update bootstrap \
+  --bundle 'registry.example.org/platform/arcturus@sha256:<digest>' \
+  --host-user appsvc \
+  --allowed-bind-root /home/appsvc/apps
+```
+
+This installs `arcturus-host-update` into `~/.local/bin` and records the non-secret installer arguments. A later control-plane update becomes:
+
+```bash
+sudo -iu appsvc arcturus-host-update apply \
+  --bundle 'registry.example.org/platform/arcturus@sha256:<new-digest>'
+```
+
+Remote deployment listeners should use a private address and a source-scoped firewall rule; loopback is the default.
+
+Full instructions: [Host installation](docs/host-installation.md) and [Host updates](docs/host-updates.md).
 
 ### 2. Bootstrap an application repository
 
 Use the companion **Arcturus Service Blueprint**:
 
 ```bash
-./scripts/arcturus-setup init \
+./scripts/arcturus-update bootstrap \
   --project-dir /path/to/my-api \
   --service my-api \
   --type web \
@@ -78,7 +95,7 @@ Use the companion **Arcturus Service Blueprint**:
   --non-interactive
 ```
 
-CI needs separate registry push credentials and a service-scoped Arcturus deployment token. The generated workflow builds validation targets, publishes immutable images, resolves digests, renders the release, deploys it, and verifies the active state.
+CI needs separate registry push credentials and a service-scoped Arcturus deployment token. The generated workflow builds validation targets, publishes immutable images, resolves digests, renders the release, deploys it, and verifies the active state. The blueprint records its setup intent so future migrations can be applied by dropping in a newer blueprint and running `./scripts/arcturus-update apply`.
 
 ### 3. Operate a service
 
@@ -97,7 +114,7 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 
 | Path | Purpose |
 | --- | --- |
-| `deploy/` | FastAPI deployment service, release engine, installer, CLI, tests, and OCI bundle build |
+| `deploy/` | FastAPI deployment service, release engine, installer, host updater, CLI, tests, and OCI bundle build |
 | `modules/bus/` | Unix-socket event bus |
 | `modules/registry/` | Active-manifest discovery and validation |
 | `modules/router/` | Safe nginx vhost generation and routing receipts |
@@ -105,7 +122,7 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 | `portal/` | Optional operator-owned ingress compatibility example; not the application release engine |
 | `terraform-modules/` | Deprecated/compatibility host and Compose-era modules |
 | `runners/` | Conservative CI-runner guidance; no registration credentials or generated state |
-| `docs/` | Architecture, manifest, operations, security, migration, roadmap, and release documentation |
+| `docs/` | Architecture, manifest, operations, security, migration, updates, roadmap, and release documentation |
 
 ## Documentation
 
@@ -113,6 +130,7 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 - [Architecture](docs/architecture.md)
 - [Manifest reference](docs/manifest-reference.md)
 - [Host installation](docs/host-installation.md)
+- [Host updates](docs/host-updates.md)
 - [Operations](docs/operations.md)
 - [Security model](docs/security.md)
 - [Migration from Compose/Terraform](docs/migration.md)

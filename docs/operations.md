@@ -11,6 +11,15 @@ export ARCTURUS_TOKEN_FILE="$HOME/.config/arcturus/my-api.token"
 
 The CLI also accepts `ARCTURUS_DEPLOY_TOKEN` for CI compatibility. Prefer a protected token file for interactive use.
 
+Before an expensive build, validate that the API is ready and that the token is scoped to the project service:
+
+```bash
+arcturusctl project preflight .arcturus/project.json \
+  --token-file "$ARCTURUS_TOKEN_FILE"
+```
+
+The preflight also verifies every Podman secret and every external named volume/network referenced by the release template. It does not expose secret values.
+
 ## Validate and preview
 
 ```bash
@@ -109,6 +118,8 @@ arcturusctl token create \
 
 Update CI, verify a deployment or status call, then revoke the previous token ID.
 
+The plaintext token exists only in the output file. Store its contents as the protected CI secret `ARCTURUS_DEPLOY_TOKEN`; do not commit the file or the token database.
+
 ## Common failures
 
 ### Manifest rejected
@@ -122,6 +133,16 @@ Verify the service account's pull-only registry login and test the exact digest-
 ### Unit did not become ready
 
 Inspect the generated target and component journals. For health-checked services, inspect Podman health output. For one-shots, verify the command exits zero and is safe to rerun.
+
+### Deployment API returned HTTP 502
+
+When the response body contains `status: failed`, the request was authenticated and reached the release engine. Arcturus uses HTTP 502 when activation failed but rollback succeeded. This is not a missing API key. Read the returned `error.message` and `rollback` object, then inspect:
+
+```bash
+systemctl --user status 'arcturus-deployer@*'
+journalctl --user -u 'arcturus-deployer@*' -n 200 --no-pager
+journalctl --user -u 'arcturus-<service>-*' -n 300 --no-pager
+```
 
 ### Router receipt missing or stale
 

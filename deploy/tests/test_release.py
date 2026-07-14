@@ -22,6 +22,7 @@ DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 COMMIT_A = "1" * 40
 COMMIT_B = "2" * 40
+COMMIT_C = "3" * 40
 
 
 def manifest(commit: str = COMMIT_A, digest: str = DIGEST_A) -> dict:
@@ -101,6 +102,14 @@ class FakeRunner(CommandRunner):
 class FakePodman:
     def __init__(self):
         self.images: set[str] = set()
+        self.containers: list[dict] = []
+        self.stopped: list[str] = []
+        self.started: list[str] = []
+        self.removed: list[str] = []
+        self.stop_failures: set[str] = set()
+        self.missing_secrets: set[str] = set()
+        self.missing_volumes: set[str] = set()
+        self.missing_networks: set[str] = set()
 
     def pull(self, image: str, timeout: int):
         self.images.add(image)
@@ -108,6 +117,29 @@ class FakePodman:
     def inspect(self, image: str):
         digest = image.split("@", 1)[1]
         return {"Digest": digest, "RepoDigests": [image]}
+
+    def secret_exists(self, name: str):
+        return name not in self.missing_secrets
+
+    def volume_exists(self, name: str):
+        return name not in self.missing_volumes
+
+    def network_exists(self, name: str):
+        return name not in self.missing_networks
+
+    def list_containers(self):
+        return self.containers
+
+    def stop_container(self, container_id: str, timeout: int = 30):
+        if container_id in self.stop_failures:
+            raise RuntimeError(f"cannot stop {container_id}")
+        self.stopped.append(container_id)
+
+    def start_container(self, container_id: str):
+        self.started.append(container_id)
+
+    def remove_container(self, container_id: str):
+        self.removed.append(container_id)
 
 
 class ManifestTests(unittest.TestCase):
@@ -159,6 +191,36 @@ class ManifestTests(unittest.TestCase):
         raw = manifest()
         raw["spec"]["components"]["web"]["mode"] = "scheduled"
         raw["spec"]["components"]["web"].pop("healthCheck")
+        with self.assertRaises(ValidationError):
+            ServiceRelease.model_validate(raw)
+
+    def test_accepts_transactional_legacy_compose_takeover(self):
+        raw = manifest()
+        raw["spec"]["migration"] = {
+            "legacyCompose": [
+                {"project": "legacy-project", "required": True, "cleanup": "retain"}
+            ]
+        }
+        release = ServiceRelease.model_validate(raw)
+        self.assertEqual(release.spec.migration.legacyCompose[0].project, "legacy-project")
+
+    def test_rejects_duplicate_legacy_compose_takeovers(self):
+        raw = manifest()
+        raw["spec"]["migration"] = {
+            "legacyCompose": [
+                {"project": "legacy-project"},
+                {"project": "legacy-project"},
+            ]
+        }
+        with self.assertRaises(ValidationError):
+            ServiceRelease.model_validate(raw)
+
+    def test_legacy_compose_takeover_requires_automatic_rollback(self):
+        raw = manifest()
+        raw["spec"]["deployment"]["rollbackOnFailure"] = False
+        raw["spec"]["migration"] = {
+            "legacyCompose": [{"project": "legacy-project"}]
+        }
         with self.assertRaises(ValidationError):
             ServiceRelease.model_validate(raw)
 
@@ -216,14 +278,16 @@ class RendererTests(unittest.TestCase):
 
 
 class DeployerTests(unittest.TestCase):
-    def make_deployer(self, base: Path, runner: FakeRunner) -> ReleaseDeployer:
+    def make_deployer(
+        self, base: Path, runner: FakeRunner, podman: FakePodman | None = None
+    ) -> ReleaseDeployer:
         return ReleaseDeployer(
             state_dir=base / "state",
             quadlet_dir=base / "quadlets",
             systemd_dir=base / "systemd",
             allowed_bind_roots=[Path("/srv")],
             runner=runner,
-            podman=FakePodman(),
+            podman=podman or FakePodman(),
             validate_generator=False,
         )
 
@@ -247,6 +311,34 @@ class DeployerTests(unittest.TestCase):
             route_status_file=status,
         )
         return deployer, status
+
+    def test_preflight_reports_missing_host_resources(self):
+        raw = manifest()
+        raw["spec"]["networks"] = [{"name": "internal_routing", "external": True}]
+        raw["spec"]["components"]["web"]["networks"] = ["internal_routing"]
+        raw["spec"]["components"]["web"]["secrets"] = [
+            {"name": "example-session", "type": "env", "target": "SESSION_SECRET"}
+        ]
+        raw["spec"]["components"]["web"]["volumes"] = [
+            {
+                "source": "legacy_data",
+                "target": "/data",
+                "type": "volume",
+                "external": True,
+            }
+        ]
+        release = ServiceRelease.model_validate(raw)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            podman = FakePodman()
+            podman.missing_secrets.add("example-session")
+            podman.missing_volumes.add("legacy_data")
+            podman.missing_networks.add("internal_routing")
+            deployer = self.make_deployer(Path(temp_dir), FakeRunner(), podman)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "host prerequisites missing: secrets=example-session; volumes=legacy_data; networks=internal_routing",
+            ):
+                deployer.preflight(release)
 
     @staticmethod
     def publish_route_from_active(deployer, status: Path, *, fail_revision: str | None = None):
@@ -373,6 +465,168 @@ class DeployerTests(unittest.TestCase):
                 self.assertRaises(TimeoutError),
             ):
                 deployer._wait_for_routing(self.request().manifest, 60, "new-deployment")
+
+    def test_first_release_quiesces_legacy_compose_before_activation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            podman = FakePodman()
+            podman.containers = [{
+                "Id": "legacy-postgres",
+                "Names": ["/legacy-project-postgres-1"],
+                "State": "running",
+                "Labels": {
+                    "com.docker.compose.project": "legacy-project",
+                    "com.docker.compose.service": "postgres",
+                },
+            }]
+            raw = manifest()
+            raw["spec"]["migration"] = {
+                "legacyCompose": [{"project": "legacy-project", "cleanup": "retain"}]
+            }
+            request = DeploymentRequest(
+                service="example-portal",
+                commit_sha=COMMIT_A,
+                manifest=ServiceRelease.model_validate(raw),
+            )
+            deployer = self.make_deployer(Path(temp_dir), FakeRunner(), podman)
+            result = deployer.deploy(request)
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(podman.stopped, ["legacy-postgres"])
+            self.assertEqual(podman.started, [])
+            self.assertEqual(
+                result["health"]["migration"]["retained_stopped"],
+                ["legacy-project-postgres-1"],
+            )
+
+    def test_existing_v2_release_without_receipt_runs_handoff_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            podman = FakePodman()
+            podman.containers = [{
+                "Id": "legacy-postgres",
+                "Names": ["/legacy-project-postgres-1"],
+                "State": "running",
+                "Labels": {"com.docker.compose.project": "legacy-project"},
+            }]
+            deployer = self.make_deployer(Path(temp_dir), FakeRunner(), podman)
+            deployer.deploy(self.request())
+
+            raw = manifest(COMMIT_B, DIGEST_B)
+            raw["spec"]["migration"] = {
+                "legacyCompose": [{"project": "legacy-project", "cleanup": "retain"}]
+            }
+            second = deployer.deploy(DeploymentRequest(
+                service="example-portal",
+                commit_sha=COMMIT_B,
+                manifest=ServiceRelease.model_validate(raw),
+            ))
+            self.assertEqual(podman.stopped, ["legacy-postgres"])
+            self.assertEqual(second["health"]["migration"]["status"], "succeeded")
+
+            raw["metadata"]["revision"] = COMMIT_C
+            third = deployer.deploy(DeploymentRequest(
+                service="example-portal",
+                commit_sha=COMMIT_C,
+                manifest=ServiceRelease.model_validate(raw),
+            ))
+            self.assertEqual(podman.stopped, ["legacy-postgres"])
+            self.assertEqual(
+                third["health"]["migration"]["status"], "previously_completed"
+            )
+
+    def test_failed_recovery_from_old_v2_restores_legacy_as_only_owner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runner = FakeRunner()
+            podman = FakePodman()
+            podman.containers = [{
+                "Id": "legacy-postgres",
+                "Names": ["/legacy-project-postgres-1"],
+                "State": "running",
+                "Labels": {"com.docker.compose.project": "legacy-project"},
+            }]
+            deployer = self.make_deployer(Path(temp_dir), runner, podman)
+            deployer.deploy(self.request())
+
+            raw = manifest(COMMIT_B, DIGEST_B)
+            raw["spec"]["migration"] = {
+                "legacyCompose": [{"project": "legacy-project", "required": True}]
+            }
+            runner.fail_restart_once = True
+            with self.assertRaises(DeploymentFailure) as failure:
+                deployer.deploy(DeploymentRequest(
+                    service="example-portal",
+                    commit_sha=COMMIT_B,
+                    manifest=ServiceRelease.model_validate(raw),
+                ))
+            self.assertTrue(failure.exception.rollback_succeeded)
+            self.assertIsNone(deployer.active("example-portal"))
+            self.assertEqual(podman.started, ["legacy-postgres"])
+            self.assertEqual(failure.exception.rollback["release"]["status"], "not_required")
+
+    def test_partial_legacy_quiesce_failure_restores_already_touched_containers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            podman = FakePodman()
+            podman.containers = [
+                {
+                    "Id": "legacy-postgres",
+                    "Names": ["/legacy-project-postgres-1"],
+                    "State": "running",
+                    "Labels": {"com.docker.compose.project": "legacy-project"},
+                },
+                {
+                    "Id": "legacy-web",
+                    "Names": ["/legacy-project-web-1"],
+                    "State": "running",
+                    "Labels": {"com.docker.compose.project": "legacy-project"},
+                },
+            ]
+            podman.stop_failures.add("legacy-web")
+            raw = manifest()
+            raw["spec"]["migration"] = {
+                "legacyCompose": [{"project": "legacy-project", "required": True}]
+            }
+            request = DeploymentRequest(
+                service="example-portal",
+                commit_sha=COMMIT_A,
+                manifest=ServiceRelease.model_validate(raw),
+            )
+            deployer = self.make_deployer(Path(temp_dir), FakeRunner(), podman)
+            with self.assertRaises(DeploymentFailure) as failure:
+                deployer.deploy(request)
+            self.assertTrue(failure.exception.rollback_succeeded)
+            self.assertEqual(podman.stopped, ["legacy-postgres"])
+            self.assertEqual(podman.started, ["legacy-postgres", "legacy-web"])
+            self.assertEqual(
+                failure.exception.rollback["legacy_compose"]["status"], "succeeded"
+            )
+
+    def test_failed_first_release_restores_legacy_compose(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runner = FakeRunner()
+            runner.fail_restart_once = True
+            podman = FakePodman()
+            podman.containers = [{
+                "Id": "legacy-web",
+                "Names": ["/legacy-project-web-1"],
+                "State": "running",
+                "Labels": {"io.podman.compose.project": "legacy-project"},
+            }]
+            raw = manifest()
+            raw["spec"]["migration"] = {
+                "legacyCompose": [{"project": "legacy-project", "required": True}]
+            }
+            request = DeploymentRequest(
+                service="example-portal",
+                commit_sha=COMMIT_A,
+                manifest=ServiceRelease.model_validate(raw),
+            )
+            deployer = self.make_deployer(Path(temp_dir), runner, podman)
+            with self.assertRaises(DeploymentFailure) as failure:
+                deployer.deploy(request)
+            self.assertTrue(failure.exception.rollback_succeeded)
+            self.assertEqual(podman.stopped, ["legacy-web"])
+            self.assertEqual(podman.started, ["legacy-web"])
+            self.assertEqual(
+                failure.exception.rollback["legacy_compose"]["status"], "succeeded"
+            )
 
     def test_failed_second_release_rolls_back_first(self):
         with tempfile.TemporaryDirectory() as temp_dir:

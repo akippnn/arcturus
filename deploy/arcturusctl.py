@@ -237,24 +237,61 @@ def api_request(
     method: str,
     path: str,
     body: dict[str, Any] | None = None,
+    *,
+    authenticated: bool = True,
 ) -> dict[str, Any]:
     base_url = (args.api_url or os.getenv("ARCTURUS_API_URL", "http://127.0.0.1:9090")).rstrip("/")
     data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"}
+    if authenticated:
+        headers["Authorization"] = f"Bearer {load_token(args)}"
     request = urllib.request.Request(
         base_url + path,
         data=data,
         method=method,
-        headers={
-            "Authorization": f"Bearer {load_token(args)}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=args.timeout) as response:
             result = json.load(response)
     except urllib.error.HTTPError as exc:
         message = exc.read().decode(errors="replace")
-        raise SystemExit(f"Arcturus API returned HTTP {exc.code}: {message}") from exc
+        try:
+            parsed = json.loads(message)
+            detail = json.dumps(parsed, indent=2, sort_keys=True)
+        except json.JSONDecodeError:
+            parsed = None
+            detail = message.strip() or "<empty response body>"
+        hint = ""
+        if exc.code == 401:
+            hint = "\nThe API is reachable, but ARCTURUS_DEPLOY_TOKEN is missing or invalid."
+        elif exc.code == 403:
+            hint = "\nThe token is valid but is not scoped to the requested service."
+        elif exc.code == 424:
+            hint = (
+                "\nThe API and token are valid, but required host resources are missing. "
+                "Create the listed Podman secrets, external volumes, or external networks "
+                "as the Arcturus host user before deploying."
+            )
+        elif (
+            exc.code == 502
+            and path == "/v1/deployments"
+            and isinstance(parsed, dict)
+            and parsed.get("status") == "failed"
+        ):
+            hint = (
+                "\nThe deployment API authenticated the request, but activation failed and "
+                "Arcturus attempted rollback. This is not an API-key failure. Inspect the "
+                "error and rollback fields above, then check the generated service journals "
+                "on the host."
+            )
+        elif exc.code in {500, 502, 503, 504}:
+            hint = (
+                "\nThe deployment API or one of its runtime dependencies failed. On the host, "
+                "check `systemctl --user status 'arcturus-deployer@*'` and "
+                "`journalctl --user -u 'arcturus-deployer@*' -n 200 --no-pager`."
+            )
+        raise SystemExit(f"Arcturus API returned HTTP {exc.code}:\n{detail}{hint}") from exc
     except urllib.error.URLError as exc:
         raise SystemExit(f"Arcturus API request failed: {exc.reason}") from exc
     if result.get("status") == "failed":
@@ -397,6 +434,38 @@ def command_project_deploy(args: argparse.Namespace) -> None:
     api_args = project_api_args(args, project)
     api_args.request = args.request
     command_deploy(api_args)
+
+
+def command_project_preflight(args: argparse.Namespace) -> None:
+    project, _, release = load_project(Path(args.project))
+    api_args = project_api_args(args, project)
+    readiness = api_request(api_args, "GET", "/healthz", authenticated=False)
+    required_features = {"authenticated-preflight", "legacy-compose-handoff"}
+    reported_features = set(readiness.get("features", [])) if isinstance(readiness, dict) else set()
+    missing_features = sorted(required_features - reported_features)
+    if missing_features:
+        version = readiness.get("version", "unknown") if isinstance(readiness, dict) else "unknown"
+        raise SystemExit(
+            "Arcturus host is incompatible with this blueprint "
+            f"(host version: {version}; missing features: {', '.join(missing_features)}). "
+            "Upgrade the host to Arcturus 0.99.0-rc.2 or newer before deploying."
+        )
+    preflight = api_request(
+        api_args,
+        "POST",
+        "/v1/preflight",
+        {
+            "service": project.service,
+            "manifest": release.model_dump(mode="json", exclude_none=True),
+        },
+    )
+    print(
+        json.dumps(
+            {"status": "ok", "readiness": readiness, "preflight": preflight},
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 def command_project_status(args: argparse.Namespace) -> None:
@@ -697,6 +766,10 @@ def build_parser() -> argparse.ArgumentParser:
     project_deploy.add_argument("--request", default="deployment-request.json")
     add_api_options(project_deploy)
     project_deploy.set_defaults(func=command_project_deploy)
+    project_preflight = project_subparsers.add_parser("preflight")
+    project_preflight.add_argument("project")
+    add_api_options(project_preflight)
+    project_preflight.set_defaults(func=command_project_preflight)
     project_status = project_subparsers.add_parser("status")
     project_status.add_argument("project")
     add_api_options(project_status)

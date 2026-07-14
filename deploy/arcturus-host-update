@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  arcturus-host-update bootstrap [--installer PATH] [install-host.sh options]
+  arcturus-host-update apply --bundle IMAGE@DIGEST [--installer PATH] [--dry-run|--validate-only] [--force-config]
+  arcturus-host-update apply --source-dir DIR [--installer PATH] [--dry-run|--validate-only] [--force-config]
+  arcturus-host-update show
+
+bootstrap
+  Install or reconfigure Arcturus and persist the non-secret host arguments.
+  Run this from an Arcturus checkout or pass --installer explicitly.
+
+apply
+  Replay the persisted host arguments against a new digest-pinned bundle or
+  local deploy source. When running from ~/.local/bin, the installer and this
+  updater are extracted from the new OCI bundle automatically.
+
+show
+  Display the installed source, last command, and next-update command.
+USAGE
+}
+
+MODE="${1:-}"
+if [[ "$MODE" =~ ^(-h|--help)$ ]]; then usage; exit 0; fi
+[[ "$MODE" =~ ^(bootstrap|apply|show)$ ]] || { usage >&2; exit 2; }
+shift
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_INSTALLER="$SELF_DIR/install-host.sh"
+CONFIG_DIR="${ARCTURUS_CONFIG_DIR:-$HOME/.config/arcturus}"
+STATE_DIR="${ARCTURUS_STATE_DIR:-$HOME/.local/share/arcturus-deployer}"
+STATE_FILE="$CONFIG_DIR/host-install.json"
+HISTORY_FILE="$STATE_DIR/host-install-history.jsonl"
+BIN_DIR="${ARCTURUS_BIN_DIR:-$HOME/.local/bin}"
+TARGET_SELF="$BIN_DIR/arcturus-host-update"
+INSTALLER=""
+BUNDLE=""
+SOURCE_DIR=""
+DRY_RUN=false
+VALIDATE_ONLY=false
+FORCE_CONFIG=false
+FORWARDED=()
+PERSISTED=()
+TEMP_DIR=""
+CONTAINER_ID=""
+SELF_SOURCE="${BASH_SOURCE[0]}"
+
+cleanup() {
+  [[ -z "$CONTAINER_ID" ]] || podman rm "$CONTAINER_ID" >/dev/null 2>&1 || true
+  [[ -z "$TEMP_DIR" || ! -d "$TEMP_DIR" ]] || rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
+
+extract_value() {
+  local wanted="$1"; shift
+  while (($#)); do
+    if [[ "$1" == "$wanted" ]]; then
+      (($# >= 2)) || return 1
+      printf '%s\n' "$2"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
+persistable_args_json() {
+  python3 - "${FORWARDED[@]}" <<'PY'
+import json, sys
+args = sys.argv[1:]
+value_options = {
+    '--host-user', '--host-home', '--listen-address', '--runner-cidr',
+    '--allowed-bind-root', '--network', '--vhosts-dir', '--nginx-container',
+    '--base-domain', '--cert-domain', '--container-cli',
+}
+flag_options = {'--configure-firewall'}
+transient_value = {'--bundle', '--source-dir', '--version'}
+transient_flags = {'--validate-only', '--dry-run', '--force-config'}
+out = []
+i = 0
+while i < len(args):
+    arg = args[i]
+    if arg in value_options:
+        if i + 1 >= len(args):
+            raise SystemExit(f'{arg} requires a value')
+        out.extend([arg, args[i + 1]])
+        i += 2
+    elif arg in flag_options:
+        out.append(arg)
+        i += 1
+    elif arg in transient_value:
+        if i + 1 >= len(args):
+            raise SystemExit(f'{arg} requires a value')
+        i += 2
+    elif arg in transient_flags:
+        i += 1
+    else:
+        raise SystemExit(f'unsupported install-host option for replay: {arg}')
+print(json.dumps(out))
+PY
+}
+
+load_persisted_args() {
+  [[ -f "$STATE_FILE" ]] || { echo "No saved host installation at $STATE_FILE; run bootstrap first." >&2; exit 2; }
+  mapfile -d '' -t PERSISTED < <(python3 - "$STATE_FILE" <<'PY'
+import json, sys
+for value in json.load(open(sys.argv[1], encoding='utf-8')).get('installArgs', []):
+    print(value, end='\0')
+PY
+)
+}
+
+resolve_installer() {
+  if [[ -n "$INSTALLER" ]]; then
+    [[ -x "$INSTALLER" ]] || { echo "Installer is not executable: $INSTALLER" >&2; exit 2; }
+    return
+  fi
+  if [[ -n "$SOURCE_DIR" ]]; then
+    INSTALLER="$SOURCE_DIR/install-host.sh"
+    [[ -x "$INSTALLER" ]] || { echo "Source directory is missing install-host.sh: $SOURCE_DIR" >&2; exit 2; }
+    [[ -f "$SOURCE_DIR/arcturus-host-update" ]] && SELF_SOURCE="$SOURCE_DIR/arcturus-host-update"
+    return
+  fi
+  if [[ -x "$DEFAULT_INSTALLER" ]]; then
+    INSTALLER="$DEFAULT_INSTALLER"
+    return
+  fi
+  [[ -n "$BUNDLE" ]] || { echo "apply requires --bundle or --source-dir" >&2; exit 2; }
+  command -v podman >/dev/null 2>&1 || { echo "Extracting the bundle installer requires podman." >&2; exit 2; }
+  TEMP_DIR="$(mktemp -d)"
+  podman pull "$BUNDLE" >/dev/null
+  CONTAINER_ID="$(podman create "$BUNDLE")"
+  podman cp "$CONTAINER_ID:/opt/arcturus/deploy/install-host.sh" "$TEMP_DIR/install-host.sh"
+  podman cp "$CONTAINER_ID:/opt/arcturus/deploy/arcturus-host-update" "$TEMP_DIR/arcturus-host-update"
+  chmod 0755 "$TEMP_DIR/install-host.sh" "$TEMP_DIR/arcturus-host-update"
+  INSTALLER="$TEMP_DIR/install-host.sh"
+  SELF_SOURCE="$TEMP_DIR/arcturus-host-update"
+}
+
+install_self() {
+  local source="$SELF_SOURCE" desired current managed backup
+  mkdir -p "$BIN_DIR" "$CONFIG_DIR"
+  desired="$(sha256sum "$source" | cut -d' ' -f1)"
+  current=""; [[ -f "$TARGET_SELF" ]] && current="$(sha256sum "$TARGET_SELF" | cut -d' ' -f1)"
+  managed=""
+  if [[ -f "$STATE_FILE" ]]; then
+    managed="$(python3 - "$STATE_FILE" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding='utf-8')).get('updaterSha256', ''))
+except (OSError, ValueError):
+    pass
+PY
+)"
+  fi
+  if [[ ! -e "$TARGET_SELF" || "$current" == "$desired" || ( -n "$managed" && "$current" == "$managed" ) ]]; then
+    install -m 0755 "$source" "$TARGET_SELF.new"
+    mv -f "$TARGET_SELF.new" "$TARGET_SELF"
+  else
+    backup="$TARGET_SELF.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -a "$TARGET_SELF" "$backup"
+    install -m 0755 "$source" "$TARGET_SELF.new"
+    mv -f "$TARGET_SELF.new" "$TARGET_SELF"
+    echo "Replaced locally modified arcturus-host-update; backup: $backup" >&2
+  fi
+  UPDATER_SHA256="$(sha256sum "$TARGET_SELF" | cut -d' ' -f1)"
+}
+
+record_state() {
+  local action="$1" install_args_json="$2" source_kind source_value command_json
+  if [[ -n "$BUNDLE" ]]; then
+    source_kind=bundle
+    source_value="$BUNDLE"
+    command_json="$(python3 - "$BUNDLE" <<'PY'
+import json, sys
+print(json.dumps(['arcturus-host-update', 'apply', '--bundle', sys.argv[1]]))
+PY
+)"
+  else
+    source_kind=source
+    source_value="$SOURCE_DIR"
+    command_json="$(python3 - "$SOURCE_DIR" <<'PY'
+import json, sys
+print(json.dumps(['arcturus-host-update', 'apply', '--source-dir', sys.argv[1]]))
+PY
+)"
+  fi
+  mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+  chmod 0700 "$CONFIG_DIR" "$STATE_DIR"
+  ACTION="$action" INSTALL_ARGS_JSON="$install_args_json" SOURCE_KIND="$source_kind" \
+  SOURCE_VALUE="$source_value" COMMAND_JSON="$command_json" UPDATER_SHA256="$UPDATER_SHA256" \
+  STATE_FILE="$STATE_FILE" HISTORY_FILE="$HISTORY_FILE" python3 - <<'PY'
+import datetime, json, os
+now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+record = {
+    'schemaVersion': 1,
+    'appliedAt': now,
+    'action': os.environ['ACTION'],
+    'source': {'kind': os.environ['SOURCE_KIND'], 'value': os.environ['SOURCE_VALUE']},
+    'installArgs': json.loads(os.environ['INSTALL_ARGS_JSON']),
+    'command': json.loads(os.environ['COMMAND_JSON']),
+    'nextUpdateCommand': ['arcturus-host-update', 'apply', '--bundle', '<new-image@sha256:digest>'],
+    'updaterSha256': os.environ['UPDATER_SHA256'],
+}
+state = os.environ['STATE_FILE']
+history = os.environ['HISTORY_FILE']
+tmp = state + '.new'
+with open(tmp, 'w', encoding='utf-8') as handle:
+    json.dump(record, handle, indent=2)
+    handle.write('\n')
+os.chmod(tmp, 0o600)
+os.replace(tmp, state)
+with open(history, 'a', encoding='utf-8') as handle:
+    handle.write(json.dumps(record, separators=(',', ':')) + '\n')
+os.chmod(history, 0o600)
+PY
+}
+
+show_state() {
+  [[ -f "$STATE_FILE" ]] || { echo "No saved host installation at $STATE_FILE" >&2; exit 1; }
+  python3 - "$STATE_FILE" <<'PY'
+import json, shlex, sys
+state = json.load(open(sys.argv[1], encoding='utf-8'))
+source = state.get('source', {})
+print(f"Installed from: {source.get('kind', 'unknown')} {source.get('value', 'unknown')}")
+print(f"Applied at:     {state.get('appliedAt', 'unknown')}")
+print('Last command:   ' + shlex.join(state.get('command', [])))
+print('Host arguments: ' + shlex.join(state.get('installArgs', [])))
+print('Next update:    ' + shlex.join(state.get('nextUpdateCommand', [])))
+PY
+}
+
+case "$MODE" in
+  bootstrap)
+    while (($#)); do
+      case "$1" in
+        --installer) INSTALLER="$2"; shift 2 ;;
+        *) FORWARDED+=("$1"); shift ;;
+      esac
+    done
+    BUNDLE="$(extract_value --bundle "${FORWARDED[@]}" || true)"
+    SOURCE_DIR="$(extract_value --source-dir "${FORWARDED[@]}" || true)"
+    [[ -n "$BUNDLE" || -n "$SOURCE_DIR" ]] || SOURCE_DIR="$(cd "$SELF_DIR" && pwd)"
+    resolve_installer
+    install_args_json="$(persistable_args_json)"
+    "$INSTALLER" "${FORWARDED[@]}"
+    install_self
+    record_state bootstrap "$install_args_json"
+    echo "Arcturus host update state recorded. Future updates: arcturus-host-update apply --bundle IMAGE@DIGEST"
+    ;;
+  apply)
+    while (($#)); do
+      case "$1" in
+        --bundle) BUNDLE="$2"; shift 2 ;;
+        --source-dir) SOURCE_DIR="$2"; shift 2 ;;
+        --installer) INSTALLER="$2"; shift 2 ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --validate-only) VALIDATE_ONLY=true; shift ;;
+        --force-config) FORCE_CONFIG=true; shift ;;
+        *) echo "Unknown apply option: $1" >&2; usage >&2; exit 2 ;;
+      esac
+    done
+    [[ -n "$BUNDLE" || -n "$SOURCE_DIR" ]] || { echo "apply requires --bundle or --source-dir" >&2; exit 2; }
+    [[ -z "$BUNDLE" || "$BUNDLE" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "--bundle must be digest-pinned" >&2; exit 2; }
+    load_persisted_args
+    resolve_installer
+    FORWARDED=("${PERSISTED[@]}")
+    [[ -z "$BUNDLE" ]] || FORWARDED+=(--bundle "$BUNDLE")
+    [[ -z "$SOURCE_DIR" ]] || FORWARDED+=(--source-dir "$SOURCE_DIR")
+    $DRY_RUN && FORWARDED+=(--dry-run)
+    $VALIDATE_ONLY && FORWARDED+=(--validate-only)
+    $FORCE_CONFIG && FORWARDED+=(--force-config)
+    "$INSTALLER" "${FORWARDED[@]}"
+    if $DRY_RUN || $VALIDATE_ONLY; then
+      echo "Validation complete; saved host update state was not changed."
+      exit 0
+    fi
+    install_self
+    install_args_json="$(python3 - "${PERSISTED[@]}" <<'PY'
+import json, sys
+print(json.dumps(sys.argv[1:]))
+PY
+)"
+    record_state apply "$install_args_json"
+    echo "Arcturus host update applied and recorded."
+    ;;
+  show)
+    (($# == 0)) || { echo "show takes no options" >&2; exit 2; }
+    show_state
+    ;;
+esac

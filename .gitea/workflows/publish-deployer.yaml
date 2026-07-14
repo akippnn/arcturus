@@ -2,7 +2,7 @@ name: Publish Arcturus control-plane bundle
 
 on:
   push:
-    tags: ['arcturus-v*']
+    tags: ['v*', 'arcturus-v*']
   workflow_dispatch:
 
 concurrency:

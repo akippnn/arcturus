@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "product": "arcturus",
+  "productVersion": "0.99.0-rc.2",
+  "manifestApis": [
+    "arcturus.u128.org/v1",
+    "arcturus.u128.org/v2"
+  ],
+  "features": [
+    "authenticated-preflight",
+    "legacy-compose-handoff",
+    "replayable-host-updates"
+  ]
+}

@@ -109,7 +109,27 @@ systemctl --user status arcturus-podman-api.service
 systemctl --user status 'arcturus-deployer@*'
 systemctl --user status arcturus-bus.service arcturus-registry.service arcturus-router.service
 podman network exists internal_routing
-curl --fail http://127.0.0.1:9090/docs >/dev/null
+curl --fail http://127.0.0.1:9090/healthz
 ```
 
-Then create a service-scoped token, deploy a non-critical example, verify routing, and run the clean-host acceptance sequence described in [Release process](release-process.md).
+Then create a service-scoped token on the host:
+
+```bash
+umask 077
+arcturusctl token create \
+  --database "$HOME/.config/arcturus/tokens.json" \
+  --service my-api \
+  --token-id my-api-ci \
+  --output "$HOME/.config/arcturus/my-api-ci.token"
+cat "$HOME/.config/arcturus/my-api-ci.token"
+```
+
+Copy only that final token value into the project CI secret named `ARCTURUS_DEPLOY_TOKEN`. The database stores a hash, while the output file contains the one-time credential. Token-file changes are read on each request and do not require restarting the deployment API.
+
+An HTTP `401` means the token is absent or invalid. An HTTP `403` means the token is valid but not scoped to the requested service. A deployment response with HTTP `502` and JSON `status: failed` means authentication succeeded, activation failed, and Arcturus attempted rollback; inspect the returned `error` and `rollback` fields and the generated unit journals.
+
+Deploy a non-critical example, verify routing, and run the clean-host acceptance sequence described in [Release process](release-process.md).
+
+## Upgrade behavior
+
+Re-running the installer with the same host user and a new digest-pinned bundle preserves the generated deployer and platform settings when their flags are omitted, including allowed bind roots, router domain, certificate domain, vhost directory, nginx container, and already-active private deployer listeners. The installer switches the `current` release atomically and restarts the running platform services so they execute the new release immediately.

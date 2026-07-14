@@ -171,6 +171,24 @@ Only enabled, successfully activated releases are published to the registry/rout
 - `timeoutSeconds`: 10–1800 seconds, default 300.
 - `rollbackOnFailure`: default `true`.
 
+## Migration policy
+
+`spec.migration.legacyCompose` declares Compose projects that must be handed off during the first successful manifest release:
+
+```json
+{
+  "migration": {
+    "legacyCompose": [
+      {"project":"legacy-project","required":false,"cleanup":"retain"}
+    ]
+  }
+}
+```
+
+The deployer discovers containers by Compose project label, records their prior running state, and stops them immediately before Quadlet activation. If activation or routing fails, only containers that were previously running are restarted. A successful release either retains the old containers in a stopped state (`retain`, the safe default) or removes the containers without removing their volumes (`remove`). The policy is ignored after a manifest release is already active for the service.
+
+`required: true` rejects the cutover when no matching Compose project is found. Use `false` when recovering a host that may already have partially stopped or removed the legacy project.
+
 ## Current limitations
 
 The v0.99 schema does not yet expose CPU, memory, or PID limits, environment overlays, backup policy, deployment hooks, or blue-green strategies. These are tracked in the [roadmap](ROADMAP.md), and should not be emulated through unreviewed generated-unit edits.

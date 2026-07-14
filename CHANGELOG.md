@@ -2,6 +2,22 @@
 
 All notable public changes to Arcturus are documented here. The project follows semantic versioning for product releases; manifest API versions are tracked separately.
 
+## [0.99.0-rc.2] - 2026-07-15
+
+### Added
+
+- Replayable host bootstrap and upgrade workflow with recorded non-secret installer arguments and append-only update history
+- Unauthenticated health and capability reporting plus authenticated service-access and deployment-preflight endpoints
+- Preflight validation for token scope, Podman secrets, external volumes, external networks, and required host capabilities
+- Machine-readable compatibility metadata for coordinated control-plane and blueprint releases
+
+### Changed
+
+- Legacy Compose ownership handoff is transactional and restores previously running containers when activation fails
+- Host upgrades preserve installer-managed configuration and restart active deployment listeners
+- CLI diagnostics now distinguish authentication, authorization, dependency-preflight, activation, and runtime failures
+- Control-plane bundle packaging now includes the replayable host updater
+
 ## [0.99.0-rc.1] - 2026-07-13
 
 ### Added

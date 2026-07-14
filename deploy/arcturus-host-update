@@ -15,8 +15,8 @@ bootstrap
 
 apply
   Replay the persisted host arguments against a new digest-pinned bundle or
-  local deploy source. When running from ~/.local/bin, the installer is
-  extracted from the new OCI bundle automatically.
+  local deploy source. When running from ~/.local/bin, the installer and this
+  updater are extracted from the new OCI bundle automatically.
 
 show
   Display the installed source, last command, and next-update command.
@@ -24,6 +24,7 @@ USAGE
 }
 
 MODE="${1:-}"
+if [[ "$MODE" =~ ^(-h|--help)$ ]]; then usage; exit 0; fi
 [[ "$MODE" =~ ^(bootstrap|apply|show)$ ]] || { usage >&2; exit 2; }
 shift
 
@@ -45,6 +46,7 @@ FORWARDED=()
 PERSISTED=()
 TEMP_DIR=""
 CONTAINER_ID=""
+SELF_SOURCE="${BASH_SOURCE[0]}"
 
 cleanup() {
   [[ -z "$CONTAINER_ID" ]] || podman rm "$CONTAINER_ID" >/dev/null 2>&1 || true
@@ -119,6 +121,7 @@ resolve_installer() {
   if [[ -n "$SOURCE_DIR" ]]; then
     INSTALLER="$SOURCE_DIR/install-host.sh"
     [[ -x "$INSTALLER" ]] || { echo "Source directory is missing install-host.sh: $SOURCE_DIR" >&2; exit 2; }
+    [[ -f "$SOURCE_DIR/arcturus-host-update" ]] && SELF_SOURCE="$SOURCE_DIR/arcturus-host-update"
     return
   fi
   if [[ -x "$DEFAULT_INSTALLER" ]]; then
@@ -131,12 +134,14 @@ resolve_installer() {
   podman pull "$BUNDLE" >/dev/null
   CONTAINER_ID="$(podman create "$BUNDLE")"
   podman cp "$CONTAINER_ID:/opt/arcturus/deploy/install-host.sh" "$TEMP_DIR/install-host.sh"
-  chmod 0755 "$TEMP_DIR/install-host.sh"
+  podman cp "$CONTAINER_ID:/opt/arcturus/deploy/arcturus-host-update" "$TEMP_DIR/arcturus-host-update"
+  chmod 0755 "$TEMP_DIR/install-host.sh" "$TEMP_DIR/arcturus-host-update"
   INSTALLER="$TEMP_DIR/install-host.sh"
+  SELF_SOURCE="$TEMP_DIR/arcturus-host-update"
 }
 
 install_self() {
-  local source="${BASH_SOURCE[0]}" desired current managed backup
+  local source="$SELF_SOURCE" desired current managed backup
   mkdir -p "$BIN_DIR" "$CONFIG_DIR"
   desired="$(sha256sum "$source" | cut -d' ' -f1)"
   current=""; [[ -f "$TARGET_SELF" ]] && current="$(sha256sum "$TARGET_SELF" | cut -d' ' -f1)"

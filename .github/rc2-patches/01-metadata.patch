@@ -1,0 +1,40 @@
+diff --git a/.gitea/workflows/publish-deployer.yaml b/.gitea/workflows/publish-deployer.yaml
+index cc215a0..c5ca9e7 100644
+--- a/.gitea/workflows/publish-deployer.yaml
++++ b/.gitea/workflows/publish-deployer.yaml
+@@ -2,7 +2,7 @@ name: Publish Arcturus control-plane bundle
+ 
+ on:
+   push:
+-    tags: ['arcturus-v*']
++    tags: ['v*', 'arcturus-v*']
+   workflow_dispatch:
+ 
+ concurrency:
+diff --git a/COMPATIBILITY.json b/COMPATIBILITY.json
+new file mode 100644
+index 0000000..275c9c6
+--- /dev/null
++++ b/COMPATIBILITY.json
+@@ -0,0 +1,14 @@
++{
++  "schemaVersion": 1,
++  "product": "arcturus",
++  "productVersion": "0.99.0-rc.2",
++  "manifestApis": [
++    "arcturus.u128.org/v1",
++    "arcturus.u128.org/v2"
++  ],
++  "features": [
++    "authenticated-preflight",
++    "legacy-compose-handoff",
++    "replayable-host-updates"
++  ]
++}
+diff --git a/VERSION b/VERSION
+index 46c9a99..075c00f 100644
+--- a/VERSION
++++ b/VERSION
+@@ -1 +1 @@
+-0.99.0-rc.1
++0.99.0-rc.2

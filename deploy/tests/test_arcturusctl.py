@@ -1,10 +1,11 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from argparse import Namespace
 from pathlib import Path
 
-from arcturusctl import command_project_render, load_project
+from arcturusctl import command_project_preflight, command_project_render, load_project
 from pydantic import ValidationError
 
 
@@ -125,6 +126,32 @@ class ProjectConfigurationTests(unittest.TestCase):
             path.write_text(json.dumps(invalid))
             with self.assertRaisesRegex(SystemExit, "no image source"):
                 load_project(path)
+
+    def test_preflight_rejects_host_without_required_features(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.fixture(Path(temp_dir))
+            with patch("arcturusctl.api_request", return_value={"status": "ok", "version": "0.99.0-rc.1"}):
+                with self.assertRaisesRegex(SystemExit, "missing features: authenticated-preflight, legacy-compose-handoff"):
+                    command_project_preflight(Namespace(
+                        project=str(path), api_url=None, token_file=None, timeout=10
+                    ))
+
+    def test_preflight_accepts_rc2_capabilities(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.fixture(Path(temp_dir))
+            responses = [
+                {
+                    "status": "ok",
+                    "version": "0.99.0-rc.2",
+                    "features": ["authenticated-preflight", "legacy-compose-handoff"],
+                },
+                {"status": "ready"},
+            ]
+            with patch("arcturusctl.api_request", side_effect=responses) as request:
+                command_project_preflight(Namespace(
+                    project=str(path), api_url=None, token_file=None, timeout=10
+                ))
+            self.assertEqual(request.call_count, 2)
 
 
 if __name__ == "__main__":

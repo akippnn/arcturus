@@ -1,15 +1,13 @@
 name: Verify RC2 GitHub releases
 
 on:
-  push:
+  pull_request:
     branches: [main]
     paths:
       - '.github/verify-v0.99.0-rc.2-releases'
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 jobs:
   verify:
@@ -44,6 +42,3 @@ jobs:
             'akippnn/arcturus-service-blueprint' \
             'arcturus-service-blueprint-0.99.0-rc.2-source.tar.gz' \
             'arcturus-service-blueprint-0.99.0-rc.2.bundle'
-
-          gh pr comment 18 --repo akippnn/arcturus --body \
-            'RC2 release verification passed: both GitHub prereleases are marked prerelease and contain the expected source archive, complete Git bundle, and SHA256SUMS assets.'

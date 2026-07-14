@@ -1,0 +1,95 @@
+diff --git a/deploy/install-host.sh b/deploy/install-host.sh
+index 1e97dda..51dc38f 100755
+--- a/deploy/install-host.sh
++++ b/deploy/install-host.sh
+@@ -154,9 +154,33 @@ if [[ "$(id -un)" != "$HOST_USER" && $VALIDATE_ONLY == false && $DRY_RUN == fals
+   echo "Run this installer as rootless user '$HOST_USER' (for example: sudo -iu $HOST_USER)." >&2
+   exit 2
+ fi
++
++# An upgrade should preserve the installed platform configuration when the
++# operator only supplies a new bundle. Read generated key/value files without
++# sourcing them as shell code.
++existing_deployer_config="$HOST_HOME/.config/arcturus/deployer.env"
++existing_platform_config="$HOST_HOME/.config/arcturus/platform.env"
++read_existing_value() {
++  local file="$1" key="$2"
++  [[ -f "$file" ]] || return 0
++  sed -n "s/^${key}=//p" "$file" | tail -n 1
++}
+ if ((${#ALLOWED_BIND_ROOTS[@]} == 0)); then
+-  ALLOWED_BIND_ROOTS=("$HOST_HOME/stacks")
++  existing_roots="$(read_existing_value "$existing_deployer_config" ARCTURUS_ALLOWED_BIND_ROOTS)"
++  if [[ -n "$existing_roots" ]]; then
++    IFS=',' read -r -a ALLOWED_BIND_ROOTS <<<"$existing_roots"
++  else
++    ALLOWED_BIND_ROOTS=("$HOST_HOME/stacks")
++  fi
+ fi
++[[ -n "$VHOSTS_DIR" ]] || VHOSTS_DIR="$(read_existing_value "$existing_platform_config" VHOSTS_DIR)"
++[[ -n "$BASE_DOMAIN" ]] || BASE_DOMAIN="$(read_existing_value "$existing_platform_config" BASE_DOMAIN)"
++[[ -n "$CERT_DOMAIN" ]] || CERT_DOMAIN="$(read_existing_value "$existing_platform_config" CERT_DOMAIN)"
++if [[ "$NGINX_CONTAINER" == portal-nginx ]]; then
++  existing_nginx="$(read_existing_value "$existing_platform_config" NGINX_CONTAINER)"
++  [[ -z "$existing_nginx" ]] || NGINX_CONTAINER="$existing_nginx"
++fi
++
+ if [[ -z "$VHOSTS_DIR" ]]; then
+   for candidate in \
+     "$HOST_HOME/arcturus/portal/config/nginx/vhosts.d" \
+@@ -334,17 +358,42 @@ if command -v loginctl >/dev/null 2>&1 && [[ "$(loginctl show-user "$HOST_USER"
+   sudo loginctl enable-linger "$HOST_USER"
+ fi
+ systemctl --user daemon-reload
+-systemctl --user enable --now arcturus-podman-api.service
+-systemctl --user enable --now arcturus-bus.service arcturus-registry.service
++
++# `enable --now` does not restart an already-running unit after the `current`
++# release symlink changes. Preserve every active deployer listener and restart
++# the platform in dependency order so the newly installed code is actually live.
++deployer_units=("arcturus-deployer@127.0.0.1.service")
++while read -r active_unit _; do
++  [[ -n "$active_unit" ]] || continue
++  found=false
++  for configured_unit in "${deployer_units[@]}"; do
++    [[ "$configured_unit" == "$active_unit" ]] && found=true
++  done
++  $found || deployer_units+=("$active_unit")
++done < <(
++  systemctl --user list-units --type=service --state=active --plain --no-legend     'arcturus-deployer@*.service' 2>/dev/null || true
++)
++if [[ -n "$LISTEN_ADDRESS" ]]; then
++  requested_unit="arcturus-deployer@$LISTEN_ADDRESS.service"
++  found=false
++  for configured_unit in "${deployer_units[@]}"; do
++    [[ "$configured_unit" == "$requested_unit" ]] && found=true
++  done
++  $found || deployer_units+=("$requested_unit")
++fi
++
++systemctl --user enable arcturus-podman-api.service
++systemctl --user restart arcturus-podman-api.service
++systemctl --user enable arcturus-bus.service arcturus-registry.service
++systemctl --user restart arcturus-bus.service arcturus-registry.service
+ if [[ -n "$BASE_DOMAIN" ]]; then
+-  systemctl --user enable --now arcturus-router.service
++  systemctl --user enable arcturus-router.service
++  systemctl --user restart arcturus-router.service
+ else
+   systemctl --user disable --now arcturus-router.service >/dev/null 2>&1 || true
+ fi
+-systemctl --user enable --now 'arcturus-deployer@127.0.0.1.service'
+-if [[ -n "$LISTEN_ADDRESS" ]]; then
+-  systemctl --user enable --now "arcturus-deployer@$LISTEN_ADDRESS.service"
+-fi
++systemctl --user enable "${deployer_units[@]}"
++systemctl --user restart "${deployer_units[@]}"
+ 
+ if $CONFIGURE_FIREWALL; then
+   firewall_family="$("$PYTHON_BIN" - "$RUNNER_CIDR" <<'PY'
+@@ -358,3 +407,5 @@ PY
+ fi
+ 
+ echo "Arcturus $VERSION installed for $HOST_USER."
++echo "API readiness: curl --fail http://127.0.0.1:9090/healthz"
++echo "Create a CI token with: arcturusctl token create --database '$CONFIG_DIR/tokens.json' --service <service> --token-id <service>-ci --output '$CONFIG_DIR/<service>-ci.token'"

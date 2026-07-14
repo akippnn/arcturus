@@ -54,8 +54,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test replayable host updates
+        run: ./deploy/tests/test-host-update.sh
       - name: Shell syntax
-        run: bash -n deploy/install-host.sh deploy/arcturusctl deploy/build-bundle.sh
+        run: bash -n deploy/install-host.sh deploy/arcturus-host-update deploy/arcturusctl deploy/build-bundle.sh deploy/tests/test-host-update.sh
       - name: Validate package metadata and examples
         run: |
           python -m json.tool modules/bus/package.json >/dev/null

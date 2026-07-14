@@ -14,11 +14,18 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header, Response
 from pydantic import BaseModel, Field, field_validator
 
-from release import DeploymentFailure, DeploymentRequest, ReleaseDeployer, redact
+from release import DeploymentFailure, DeploymentRequest, ReleaseDeployer, ServiceRelease, redact
 
 load_dotenv()
 
 app = FastAPI(title="Arcturus Deploy Service")
+
+ARCTURUS_PRODUCT_VERSION = "0.99.0-rc.2"
+ARCTURUS_FEATURES = [
+    "authenticated-preflight",
+    "legacy-compose-handoff",
+    "replayable-host-updates",
+]
 
 STACKS_BASE = Path(os.getenv("STACKS_BASE_DIR", "/data/stacks"))
 PORTAL_VHOSTS = Path(os.getenv("PORTAL_VHOSTS_DIR", "/data/portal/vhosts.d"))
@@ -146,7 +153,23 @@ class RollbackRequest(BaseModel):
     deployment_id: str | None = None
 
 
+class PreflightRequest(BaseModel):
+    service: str
+    manifest: ServiceRelease
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+@app.get("/healthz")
+def healthz():
+    """Minimal unauthenticated readiness probe for the deployment API."""
+    return {
+        "status": "ok",
+        "service": "arcturus-deployer",
+        "version": ARCTURUS_PRODUCT_VERSION,
+        "features": ARCTURUS_FEATURES,
+    }
 
 def _token_records() -> list[dict]:
     records: list[dict] = []
@@ -514,10 +537,37 @@ def create_deployment(
         return {
             "status": "failed",
             "service": request.service,
+            "deployment_id": exc.deployment_id,
             "rollback": exc.rollback,
             "error": {"code": "deployment_failed", "message": redact(str(exc))},
         }
     return result
+
+
+@app.get("/v1/services/{service}/access")
+def check_service_access(
+    service: str,
+    authorization: str | None = Header(None),
+):
+    """Validate that a CI token can operate on a service before image builds begin."""
+    if not STACK_RE.fullmatch(service):
+        raise HTTPException(400, "service must be a lowercase slug")
+    authorize_service(authorization, service)
+    return {"status": "ok", "service": service}
+
+
+@app.post("/v1/preflight")
+def preflight_release(
+    request: PreflightRequest,
+    authorization: str | None = Header(None),
+):
+    if request.service != request.manifest.metadata.name:
+        raise HTTPException(400, "preflight service does not match manifest metadata")
+    authorize_service(authorization, request.service)
+    try:
+        return get_release_deployer().preflight(request.manifest)
+    except RuntimeError as exc:
+        raise HTTPException(424, str(redact(str(exc)))) from exc
 
 
 @app.get("/v1/deployments/{deployment_id}")

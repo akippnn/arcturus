@@ -261,6 +261,34 @@ class DeploymentPolicy(BaseModel):
     rollbackOnFailure: bool = True
 
 
+class LegacyComposeTakeover(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: str
+    required: bool = False
+    cleanup: Literal["retain", "remove"] = "retain"
+
+    @field_validator("project")
+    @classmethod
+    def validate_project(cls, value: str) -> str:
+        if not NETWORK_RE.fullmatch(value):
+            raise ValueError("legacy Compose project contains invalid characters")
+        return value
+
+
+class MigrationPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    legacyCompose: list[LegacyComposeTakeover] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_unique_projects(self) -> "MigrationPolicy":
+        projects = [item.project for item in self.legacyCompose]
+        if len(projects) != len(set(projects)):
+            raise ValueError("legacy Compose projects must be unique")
+        return self
+
+
 class ReleaseSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -270,6 +298,7 @@ class ReleaseSpec(BaseModel):
     )
     routing: dict[str, RoutingService] = Field(default_factory=dict)
     deployment: DeploymentPolicy = Field(default_factory=DeploymentPolicy)
+    migration: MigrationPolicy | None = None
 
     @model_validator(mode="after")
     def validate_references(self) -> "ReleaseSpec":
@@ -298,6 +327,12 @@ class ReleaseSpec(BaseModel):
                 raise ValueError(f"route {name} references missing component {route.component}")
             if self.components[route.component].mode != "service":
                 raise ValueError(f"route {name} must reference a long-running service component")
+        if (
+            self.migration is not None
+            and self.migration.legacyCompose
+            and not self.deployment.rollbackOnFailure
+        ):
+            raise ValueError("legacy Compose migration requires rollbackOnFailure")
         self._check_cycles()
         return self
 
@@ -450,6 +485,68 @@ class PodmanClient:
                     f"Podman image inspect failed ({response.status_code}): {redact(response.text)}"
                 )
             return response.json()
+
+    def _resource_exists(self, path: str) -> bool:
+        with self._client(30) as client:
+            response = client.get(path)
+            if response.status_code == 404:
+                return False
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Podman resource inspection failed ({response.status_code}): "
+                    f"{redact(response.text)}"
+                )
+            return True
+
+    def secret_exists(self, name: str) -> bool:
+        return self._resource_exists(f"/secrets/{quote(name, safe='')}/json")
+
+    def volume_exists(self, name: str) -> bool:
+        return self._resource_exists(f"/volumes/{quote(name, safe='')}/json")
+
+    def network_exists(self, name: str) -> bool:
+        return self._resource_exists(f"/networks/{quote(name, safe='')}/json")
+
+    def list_containers(self) -> list[dict[str, Any]]:
+        with self._client(30) as client:
+            response = client.get("/containers/json", params={"all": "true"})
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Podman container listing failed ({response.status_code}): {redact(response.text)}"
+                )
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise RuntimeError("Podman container listing returned an invalid response")
+            return payload
+
+    def stop_container(self, container_id: str, timeout: int = 30) -> None:
+        encoded = quote(container_id, safe="")
+        with self._client(timeout + 5) as client:
+            response = client.post(f"/containers/{encoded}/stop", params={"t": timeout})
+            if response.status_code not in {204, 304}:
+                raise RuntimeError(
+                    f"Podman container stop failed ({response.status_code}): {redact(response.text)}"
+                )
+
+    def start_container(self, container_id: str) -> None:
+        encoded = quote(container_id, safe="")
+        with self._client(35) as client:
+            response = client.post(f"/containers/{encoded}/start")
+            if response.status_code not in {204, 304}:
+                raise RuntimeError(
+                    f"Podman container start failed ({response.status_code}): {redact(response.text)}"
+                )
+
+    def remove_container(self, container_id: str) -> None:
+        encoded = quote(container_id, safe="")
+        with self._client(35) as client:
+            response = client.delete(
+                f"/containers/{encoded}", params={"force": "true", "v": "false"}
+            )
+            if response.status_code not in {204, 404}:
+                raise RuntimeError(
+                    f"Podman container removal failed ({response.status_code}): {redact(response.text)}"
+                )
 
 
 class DeploymentStore:
@@ -841,9 +938,16 @@ class QuadletRenderer:
 
 
 class DeploymentFailure(RuntimeError):
-    def __init__(self, message: str, *, rollback: dict[str, Any]):
+    def __init__(
+        self,
+        message: str,
+        *,
+        rollback: dict[str, Any],
+        deployment_id: str | None = None,
+    ):
         super().__init__(message)
         self.rollback = rollback
+        self.deployment_id = deployment_id
         self.rollback_succeeded = rollback.get("status") in {"succeeded", "not_required"}
 
 
@@ -944,10 +1048,17 @@ class ReleaseDeployer:
             quadlets = release_path / "quadlet"
             release_path.mkdir(parents=True, exist_ok=False)
             (release_path / "manifest.json").write_text(request.manifest.canonical_json() + "\n")
+            takeover: list[dict[str, Any]] = []
+            migration_required = self._legacy_compose_handoff_required(
+                previous, request.manifest
+            )
             try:
+                self.preflight(request.manifest)
                 images = self._pull_and_verify(request.manifest)
                 units = self.renderer.render(request.manifest, quadlets)
                 self._validate_quadlets(quadlets)
+                if migration_required:
+                    self._quiesce_legacy_compose(request.manifest, takeover)
                 self._activate(request.service, release_path, units, request.manifest.spec.deployment.timeoutSeconds)
                 self._run_scheduled_on_deploy(request.manifest)
                 self._publish_manifest(request.service, request.manifest, deployment_id)
@@ -956,7 +1067,15 @@ class ReleaseDeployer:
                     request.manifest.spec.deployment.timeoutSeconds,
                     deployment_id,
                 )
-                health = {"status": "healthy", "units": units, "routing": routing}
+                migration = self._migration_health(
+                    request.manifest, takeover, migration_required
+                )
+                health = {
+                    "status": "healthy",
+                    "units": units,
+                    "routing": routing,
+                    "migration": migration,
+                }
                 result = self.store.finish(
                     deployment_id,
                     "succeeded",
@@ -971,11 +1090,16 @@ class ReleaseDeployer:
                 )
                 return self._response_with_routing(result, images=images)
             except Exception as exc:
+                legacy_was_active = any(item.get("was_running") for item in takeover)
+                rollback_target = None if legacy_was_active else previous
                 rollback = (
-                    self._rollback(request.service, previous)
+                    self._rollback(request.service, rollback_target)
                     if request.manifest.spec.deployment.rollbackOnFailure
                     else {"status": "disabled"}
                 )
+                if takeover:
+                    legacy_restore = self._restore_legacy_compose(takeover)
+                    rollback = self._merge_legacy_rollback(rollback, legacy_restore)
                 error = {"code": "deployment_failed", "message": str(redact(str(exc)))}
                 self.store.finish(
                     deployment_id,
@@ -993,7 +1117,40 @@ class ReleaseDeployer:
                 raise DeploymentFailure(
                     error["message"],
                     rollback=rollback,
+                    deployment_id=deployment_id,
                 ) from exc
+
+    def preflight(self, manifest: ServiceRelease) -> dict[str, Any]:
+        secret_names = sorted(
+            {secret.name for component in manifest.spec.components.values() for secret in component.secrets}
+        )
+        external_volumes = sorted(
+            {
+                volume.source
+                for component in manifest.spec.components.values()
+                for volume in component.volumes
+                if volume.type == "volume" and volume.external
+            }
+        )
+        external_networks = sorted(network.name for network in manifest.spec.networks if network.external)
+        missing = {
+            "secrets": [name for name in secret_names if not self.podman.secret_exists(name)],
+            "volumes": [name for name in external_volumes if not self.podman.volume_exists(name)],
+            "networks": [name for name in external_networks if not self.podman.network_exists(name)],
+        }
+        missing = {kind: names for kind, names in missing.items() if names}
+        if missing:
+            details = "; ".join(f"{kind}={','.join(names)}" for kind, names in missing.items())
+            raise RuntimeError(f"host prerequisites missing: {details}")
+        return {
+            "status": "ready",
+            "service": manifest.metadata.name,
+            "checked": {
+                "secrets": secret_names,
+                "volumes": external_volumes,
+                "networks": external_networks,
+            },
+        }
 
     def get(self, deployment_id: str) -> dict[str, Any] | None:
         record = self.store.get(deployment_id)
@@ -1129,6 +1286,177 @@ class ReleaseDeployer:
                 return operation
             except Exception as exc:
                 return self._fail_operation(operation_id, "remove_failed", exc)
+
+    @staticmethod
+    def _normalized_migration_policy(value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        try:
+            policy = MigrationPolicy.model_validate(value)
+        except ValidationError:
+            return None
+        if not policy.legacyCompose:
+            return None
+        return policy.model_dump(mode="json", exclude_none=True)
+
+    def _legacy_compose_handoff_required(
+        self,
+        previous: dict[str, Any] | None,
+        manifest: ServiceRelease,
+    ) -> bool:
+        current = self._normalized_migration_policy(manifest.spec.migration)
+        if current is None:
+            return False
+        if previous is None:
+            return True
+        prior_manifest = previous.get("manifest") or {}
+        prior_raw = (prior_manifest.get("spec") or {}).get("migration")
+        prior = self._normalized_migration_policy(prior_raw)
+        if prior != current:
+            return True
+        status = ((previous.get("health") or {}).get("migration") or {}).get("status")
+        return status not in {"succeeded", "warning", "not_required", "previously_completed"}
+
+    def _migration_health(
+        self,
+        manifest: ServiceRelease,
+        takeovers: list[dict[str, Any]],
+        migration_required: bool,
+    ) -> dict[str, Any]:
+        policy = manifest.spec.migration
+        if policy is None or not policy.legacyCompose:
+            return {"status": "not_configured"}
+        projects = [item.project for item in policy.legacyCompose]
+        if not migration_required:
+            return {"status": "previously_completed", "projects": projects}
+        result = self._finalize_legacy_compose(takeovers)
+        result["projects"] = projects
+        return result
+
+    @staticmethod
+    def _container_name(container: dict[str, Any]) -> str:
+        names = container.get("Names") or container.get("names") or []
+        if isinstance(names, str):
+            names = [names]
+        if names:
+            return str(names[0]).lstrip("/")
+        return str(container.get("Id") or container.get("ID") or "unknown")[:12]
+
+    @staticmethod
+    def _container_labels(container: dict[str, Any]) -> dict[str, str]:
+        labels = container.get("Labels") or container.get("labels") or {}
+        return labels if isinstance(labels, dict) else {}
+
+    @staticmethod
+    def _container_state(container: dict[str, Any]) -> str:
+        return str(container.get("State") or container.get("state") or "").lower()
+
+    def _quiesce_legacy_compose(
+        self,
+        manifest: ServiceRelease,
+        takeovers: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        policy = manifest.spec.migration
+        if takeovers is None:
+            takeovers = []
+        if policy is None or not policy.legacyCompose:
+            return takeovers
+        containers = self.podman.list_containers()
+        seen = {str(item.get("id", "")) for item in takeovers}
+        for legacy in policy.legacyCompose:
+            matched: list[dict[str, Any]] = []
+            for container in containers:
+                labels = self._container_labels(container)
+                project = (
+                    labels.get("com.docker.compose.project")
+                    or labels.get("io.podman.compose.project")
+                    or labels.get("com.docker.compose.project.working_dir", "")
+                    .rstrip("/")
+                    .split("/")[-1]
+                )
+                if project == legacy.project:
+                    matched.append(container)
+            if legacy.required and not matched:
+                raise RuntimeError(
+                    f"required legacy Compose project was not found: {legacy.project}"
+                )
+            for container in matched:
+                container_id = str(container.get("Id") or container.get("ID") or "")
+                if not container_id or container_id in seen:
+                    continue
+                seen.add(container_id)
+                was_running = self._container_state(container) in {"running", "paused"}
+                record = {
+                    "id": container_id,
+                    "name": self._container_name(container),
+                    "project": legacy.project,
+                    "was_running": was_running,
+                    "cleanup": legacy.cleanup,
+                }
+                # Record before stopping. If the API times out after stopping,
+                # the outer deployment rollback still has enough state to recover.
+                takeovers.append(record)
+                if was_running:
+                    self.podman.stop_container(container_id, 30)
+        if takeovers:
+            audit(
+                "migration.legacy_compose.quiesced",
+                service=manifest.metadata.name,
+                containers=[item["name"] for item in takeovers],
+            )
+        return takeovers
+
+    def _restore_legacy_compose(self, takeovers: list[dict[str, Any]]) -> dict[str, Any]:
+        restored: list[str] = []
+        failures: list[dict[str, str]] = []
+        for item in takeovers:
+            if not item.get("was_running"):
+                continue
+            try:
+                self.podman.start_container(item["id"])
+                restored.append(item["name"])
+            except Exception as exc:
+                failures.append({"container": item["name"], "message": str(redact(str(exc)))})
+        status = "failed" if failures else "succeeded"
+        result = {"status": status, "restored": restored, "failures": failures}
+        audit("migration.legacy_compose.restore", **result)
+        return result
+
+    def _finalize_legacy_compose(self, takeovers: list[dict[str, Any]]) -> dict[str, Any]:
+        if not takeovers:
+            return {"status": "not_required"}
+        retained = [item["name"] for item in takeovers if item.get("cleanup") == "retain"]
+        removed: list[str] = []
+        failures: list[dict[str, str]] = []
+        for item in takeovers:
+            if item.get("cleanup") != "remove":
+                continue
+            try:
+                self.podman.remove_container(item["id"])
+                removed.append(item["name"])
+            except Exception as exc:
+                failures.append({"container": item["name"], "message": str(redact(str(exc)))})
+        status = "warning" if failures else "succeeded"
+        result = {
+            "status": status,
+            "retained_stopped": retained,
+            "removed": removed,
+            "failures": failures,
+        }
+        audit("migration.legacy_compose.finalized", **result)
+        return result
+
+    @staticmethod
+    def _merge_legacy_rollback(
+        rollback: dict[str, Any], legacy_restore: dict[str, Any]
+    ) -> dict[str, Any]:
+        base_succeeded = rollback.get("status") in {"succeeded", "not_required"}
+        legacy_succeeded = legacy_restore.get("status") == "succeeded"
+        return {
+            "status": "succeeded" if base_succeeded and legacy_succeeded else "failed",
+            "release": rollback,
+            "legacy_compose": legacy_restore,
+        }
 
     def _pull_and_verify(self, manifest: ServiceRelease) -> list[str]:
         images = sorted({component.image for component in manifest.spec.components.values()})
@@ -1364,6 +1692,8 @@ class ReleaseDeployer:
                 self._withdraw_manifest(service)
                 self._wait_for_withdrawal(service, 30)
                 self.runner.run(["systemctl", "--user", "daemon-reload"], timeout=30)
+                self.store.clear_active(service)
+                self.store.set_desired_state(service, "disabled")
                 return {"status": "not_required"}
             except Exception as exc:
                 return {"status": "failed", "message": str(redact(str(exc)))}

@@ -2,7 +2,7 @@
 
 Arcturus is a manifest-driven application platform for deploying immutable OCI releases to a single AlmaLinux host with rootless Podman, Quadlet, and user systemd.
 
-> **Status:** `v0.99.0-rc.1`. The core release path is implemented and tested. The remaining v1.0 work is clean-host acceptance, resource-limit support, and freezing the public manifest contract.
+> **Status:** `v0.99.0-rc.2`. RC2 adds authenticated deployment preflight, transactional handoff from legacy Compose ownership, and replayable host/project updates. The remaining v1.0 work is clean-host acceptance, resource-limit support, and freezing the public manifest contract.
 
 Arcturus deliberately targets the space between hand-maintained Compose deployments and a full container orchestrator. CI builds images and resolves their digests; Arcturus validates a release manifest, renders generated Quadlets, activates the release, verifies readiness, publishes routing state, and restores the previous healthy release when activation fails.
 
@@ -18,6 +18,9 @@ Arcturus deliberately targets the space between hand-maintained Compose deployme
 - Podman secret references without embedding secret values in manifests
 - Active-manifest publication for the registry/router
 - A project bootstrap repository for web, worker, scheduled, and multi-component services
+- Authenticated preflight before expensive application builds
+- Transactional Compose-to-Quadlet ownership handoff
+- Replayable, recorded host and project update workflows
 
 Arcturus does **not** build images on the production host, deploy floating tags, let Watchtower replace releases, or require Terraform/Compose for normal application updates.
 
@@ -26,16 +29,16 @@ Arcturus does **not** build images on the production host, deploy floating tags,
 ```text
 application repository
         |
-        | tests + Buildah build + registry push
+        | authenticated preflight + tests + Buildah build + registry push
         v
 immutable image digests + ServiceRelease manifest
         |
         | authenticated deployment request
         v
 Arcturus deployer
-  validate -> pre-pull -> render -> generator check -> activate
-        |                                        |
-        |                                        +-> rollback on failure
+  preflight -> validate -> pre-pull -> render -> handoff -> activate
+        |                                                   |
+        |                                                   +-> rollback on failure
         v
 rootless Podman Quadlets + user systemd
         |
@@ -58,16 +61,32 @@ sudo -iu appsvc ./deploy/install-host.sh \
   --allowed-bind-root /home/appsvc/apps
 ```
 
-Review the resolved installation with `--dry-run`, then rerun without those flags. Remote deployment listeners should use a private address and a source-scoped firewall rule; loopback is the default.
+Review the resolved installation with `--dry-run`. For the actual installation, use the replayable wrapper with the same persistent host arguments:
 
-Full instructions: [Host installation](docs/host-installation.md).
+```bash
+sudo -iu appsvc ./deploy/arcturus-host-update bootstrap \
+  --bundle 'registry.example.org/platform/arcturus@sha256:<digest>' \
+  --host-user appsvc \
+  --allowed-bind-root /home/appsvc/apps
+```
+
+This installs `arcturus-host-update` into `~/.local/bin` and records the non-secret installer arguments. A later control-plane update becomes:
+
+```bash
+sudo -iu appsvc arcturus-host-update apply \
+  --bundle 'registry.example.org/platform/arcturus@sha256:<new-digest>'
+```
+
+Remote deployment listeners should use a private address and a source-scoped firewall rule; loopback is the default.
+
+Full instructions: [Host installation](docs/host-installation.md) and [Host updates](docs/host-updates.md).
 
 ### 2. Bootstrap an application repository
 
 Use the companion **Arcturus Service Blueprint**:
 
 ```bash
-./scripts/arcturus-setup init \
+./scripts/arcturus-update bootstrap \
   --project-dir /path/to/my-api \
   --service my-api \
   --type web \
@@ -78,7 +97,20 @@ Use the companion **Arcturus Service Blueprint**:
   --non-interactive
 ```
 
-CI needs separate registry push credentials and a service-scoped Arcturus deployment token. The generated workflow builds validation targets, publishes immutable images, resolves digests, renders the release, deploys it, and verifies the active state.
+Create a service-scoped deployment credential on the host as the rootless Arcturus user:
+
+```bash
+umask 077
+arcturusctl token create \
+  --database "$HOME/.config/arcturus/tokens.json" \
+  --service my-api \
+  --token-id my-api-ci \
+  --output "$HOME/.config/arcturus/my-api-ci.token"
+```
+
+Copy only the output file's value into the project's protected `ARCTURUS_DEPLOY_TOKEN` CI secret. CI also needs registry push credentials. The generated workflow authenticates and checks host capabilities, token scope, Podman secrets, and external volumes/networks before building images. It then builds validation targets, publishes immutable images, resolves digests, renders the release, deploys it, and verifies the active state.
+
+The blueprint records its setup intent so future migrations can be applied by dropping in a newer blueprint and running `./scripts/arcturus-update apply`.
 
 ### 3. Operate a service
 
@@ -97,7 +129,7 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 
 | Path | Purpose |
 | --- | --- |
-| `deploy/` | FastAPI deployment service, release engine, installer, CLI, tests, and OCI bundle build |
+| `deploy/` | FastAPI deployment service, release engine, installer, host updater, CLI, tests, and OCI bundle build |
 | `modules/bus/` | Unix-socket event bus |
 | `modules/registry/` | Active-manifest discovery and validation |
 | `modules/router/` | Safe nginx vhost generation and routing receipts |
@@ -105,7 +137,7 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 | `portal/` | Optional operator-owned ingress compatibility example; not the application release engine |
 | `terraform-modules/` | Deprecated/compatibility host and Compose-era modules |
 | `runners/` | Conservative CI-runner guidance; no registration credentials or generated state |
-| `docs/` | Architecture, manifest, operations, security, migration, roadmap, and release documentation |
+| `docs/` | Architecture, manifest, operations, security, migration, updates, roadmap, and release documentation |
 
 ## Documentation
 
@@ -113,20 +145,24 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 - [Architecture](docs/architecture.md)
 - [Manifest reference](docs/manifest-reference.md)
 - [Host installation](docs/host-installation.md)
+- [Host updates](docs/host-updates.md)
 - [Operations](docs/operations.md)
 - [Security model](docs/security.md)
 - [Migration from Compose/Terraform](docs/migration.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Release process](docs/release-process.md)
+- [Machine-readable compatibility](COMPATIBILITY.json)
 
-## Versioning
+## Versioning and compatibility
 
 Product versions and manifest API versions are independent:
 
-- Product release candidate: `v0.99.0-rc.1`
+- Product release candidate: `v0.99.0-rc.2`
 - Stable product target: `v1.0.0`
 - Current manifest API: `arcturus.u128.org/v2`
 - Legacy routing/stack API: `arcturus.u128.org/v1`
+
+The RC2 Service Blueprint requires the RC2 host capabilities `authenticated-preflight` and `legacy-compose-handoff`. The generated lockfile and the CLI preflight make that dependency explicit and reject an older host before application image builds begin. See [`COMPATIBILITY.json`](COMPATIBILITY.json).
 
 Product v1.0 will stabilize the existing manifest API v2. See the [roadmap](docs/ROADMAP.md).
 

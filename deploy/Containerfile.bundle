@@ -16,7 +16,7 @@ RUN mkdir -p wheelhouse \
     && python3.12 -m pip wheel --wheel-dir wheelhouse --requirement requirements.txt \
     && python3.12 -m pip install --no-index --find-links wheelhouse --requirement requirements.txt
 COPY deploy/app.py deploy/release.py deploy/arcturusctl.py deploy/arcturusctl deploy/install-host.sh \
-     deploy/arcturus-deployer@.service deploy/arcturus-podman-api.service \
+     deploy/arcturus-host-update deploy/arcturus-deployer@.service deploy/arcturus-podman-api.service \
      deploy/arcturus-bus.service deploy/arcturus-registry.service deploy/arcturus-router.service ./
 COPY --from=platform-build /build/modules/bus/dist /opt/arcturus/modules/bus/dist
 COPY --from=platform-build /build/modules/bus/package.json /opt/arcturus/modules/bus/package.json
@@ -25,12 +25,12 @@ COPY --from=platform-build /build/modules/router/package.json /opt/arcturus/modu
 COPY --from=platform-build /build/modules/registry/dist /opt/arcturus/modules/registry/dist
 COPY --from=platform-build /build/modules/registry/package.json /opt/arcturus/modules/registry/package.json
 COPY --from=platform-build /build/modules/registry/node_modules/zod /opt/arcturus/modules/registry/node_modules/zod
-RUN chmod 0755 arcturusctl.py arcturusctl install-host.sh
+RUN chmod 0755 arcturusctl.py arcturusctl install-host.sh arcturus-host-update
 
 FROM base AS test
 COPY deploy/tests ./tests
 COPY deploy/build-bundle.sh ./
-RUN bash -n install-host.sh arcturusctl build-bundle.sh \
+RUN bash -n install-host.sh arcturus-host-update arcturusctl build-bundle.sh \
     && python3.12 -m py_compile app.py release.py arcturusctl.py \
     && CERT_DOMAIN=example.org python3.12 -m unittest discover -s tests -v \
     && python3.12 -m pip install pip-audit \

@@ -34,15 +34,19 @@ Every routed component must join the operator's routing network. Preserve the ex
 
 ## 5. Cut over one lifecycle owner
 
-During a maintenance window:
+Stop Watchtower and prevent Terraform provisioners from recreating the application. For a rootless Podman Compose deployment, declare the old project in the first release:
 
-1. stop Watchtower and Compose ownership
-2. prevent Terraform provisioners from recreating the application
-3. deploy through Arcturus
-4. verify one-shots, services, timers, data, health, and routing
-5. remove obsolete application resources from Terraform state without invoking destructive provisioners when necessary
+```json
+"migration": {
+  "legacyCompose": [
+    {"project":"legacy-project","required":false,"cleanup":"retain"}
+  ]
+}
+```
 
-Do not let Compose and Quadlet own the same production container concurrently.
+Arcturus then performs the critical handoff transaction itself: pull and validate the new release, stop the matching Compose containers, activate and verify Quadlets and routing, and restart the formerly running Compose containers if the new release fails. External named volumes are never removed by the handoff. Retain the stopped legacy containers until the new release and rollback behavior have been verified, then remove them deliberately.
+
+After success, remove obsolete application resources from Terraform state without invoking destructive provisioners when necessary. Do not let Compose and Quadlet own the same production container concurrently.
 
 ## 6. Prove rollback and reboot
 

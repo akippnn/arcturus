@@ -1,0 +1,71 @@
+diff --git a/deploy/tests/test_app.py b/deploy/tests/test_app.py
+index 082ad02..6b04253 100644
+--- a/deploy/tests/test_app.py
++++ b/deploy/tests/test_app.py
+@@ -56,6 +56,47 @@ class ValidationTests(unittest.TestCase):
+                 deploy_app.authorize_service(f"Bearer {token}", "another-service")
+             self.assertEqual(forbidden.exception.status_code, 403)
+ 
++    def test_healthz_is_available_without_authentication(self):
++        payload = deploy_app.healthz()
++        self.assertEqual(payload["status"], "ok")
++        self.assertEqual(payload["service"], "arcturus-deployer")
++        self.assertEqual(payload["version"], "0.99.0-rc.2")
++        self.assertIn("authenticated-preflight", payload["features"])
++        self.assertIn("legacy-compose-handoff", payload["features"])
++
++    def test_service_access_checks_token_scope(self):
++        with patch.object(deploy_app, "authorize_service") as authorize:
++            result = deploy_app.check_service_access("example-portal", "Bearer test")
++        authorize.assert_called_once_with("Bearer test", "example-portal")
++        self.assertEqual(result, {"status": "ok", "service": "example-portal"})
++
++    def test_preflight_checks_auth_and_host_resources(self):
++        digest = "sha256:" + "a" * 64
++        revision = "1" * 40
++        request = deploy_app.PreflightRequest.model_validate({
++            "service": "example-portal",
++            "manifest": {
++                "apiVersion": "arcturus.u128.org/v2",
++                "kind": "ServiceRelease",
++                "metadata": {"name": "example-portal", "revision": revision},
++                "spec": {
++                    "components": {
++                        "web": {"image": f"registry.example.org/example/portal@{digest}"}
++                    }
++                },
++            },
++        })
++        deployer = unittest.mock.Mock()
++        deployer.preflight.return_value = {"status": "ready", "service": "example-portal"}
++        with (
++            patch.object(deploy_app, "authorize_service") as authorize,
++            patch.object(deploy_app, "get_release_deployer", return_value=deployer),
++        ):
++            result = deploy_app.preflight_release(request, "Bearer test")
++        authorize.assert_called_once_with("Bearer test", "example-portal")
++        deployer.preflight.assert_called_once_with(request.manifest)
++        self.assertEqual(result["status"], "ready")
++
+     def test_deploy_request_rejects_path_traversal(self):
+         with self.assertRaises(ValidationError):
+             deploy_app.DeployRequest(stack="../outside")
+@@ -160,7 +201,9 @@ class ValidationTests(unittest.TestCase):
+         }
+         deployer = unittest.mock.Mock()
+         deployer.deploy.side_effect = DeploymentFailure(
+-            "activation failed token=hidden", rollback={"status": "succeeded"}
++            "activation failed token=hidden",
++            rollback={"status": "succeeded"},
++            deployment_id="failed-deployment-id",
+         )
+         with (
+             patch.object(deploy_app, "authorize_service"),
+@@ -172,6 +215,7 @@ class ValidationTests(unittest.TestCase):
+             )
+         self.assertEqual(response.status_code, 502)
+         self.assertEqual(body["status"], "failed")
++        self.assertEqual(body["deployment_id"], "failed-deployment-id")
+         self.assertNotIn("hidden", json.dumps(body))
+ 
+     def test_v2_deployment_success_requires_succeeded_result(self):

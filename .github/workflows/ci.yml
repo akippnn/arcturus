@@ -61,15 +61,19 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
-        module: [bus, registry, router]
+        module: [router, bus, registry]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: modules/${{ matrix.module }}/package-lock.json
+          cache-dependency-path: |
+            modules/bus/package-lock.json
+            modules/registry/package-lock.json
+            modules/router/package-lock.json
       - name: Install dependencies
         shell: bash
         run: |

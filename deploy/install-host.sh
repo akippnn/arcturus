@@ -126,7 +126,7 @@ if [[ -n "$SOURCE_DIR" && ! -f "$SOURCE_DIR/requirements.txt" ]]; then
   errors+=("source directory does not contain requirements.txt: $SOURCE_DIR")
 fi
 if [[ -n "$SOURCE_DIR" ]]; then
-  for file in app.py release.py arcturusctl.py arcturus-deployer@.service \
+  for file in app.py image_policy_app.py release.py arcturusctl.py arcturus-deployer@.service \
     arcturus-podman-api.service arcturus-bus.service arcturus-registry.service \
     arcturus-router.service; do
     [[ -f "$SOURCE_DIR/$file" ]] || errors+=("source artifact is missing: $SOURCE_DIR/$file")
@@ -243,7 +243,7 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ -n "$SOURCE_DIR" ]]; then
-  for file in app.py release.py arcturusctl.py requirements.txt \
+  for file in app.py image_policy_app.py release.py arcturusctl.py requirements.txt \
     arcturus-deployer@.service arcturus-podman-api.service arcturus-bus.service \
     arcturus-registry.service arcturus-router.service arcturusctl; do
     install -m 0644 "$SOURCE_DIR/$file" "$staging/$file"

@@ -1,22 +1,60 @@
 version: 2
 updates:
   - package-ecosystem: npm
-    directory: /modules/bus
+    directories:
+      - /modules/bus
+      - /modules/registry
+      - /modules/router
     schedule:
       interval: monthly
-  - package-ecosystem: npm
-    directory: /modules/registry
-    schedule:
-      interval: monthly
-  - package-ecosystem: npm
-    directory: /modules/router
-    schedule:
-      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      routine-node-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+        group-by: dependency-name
+      major-node-updates:
+        patterns:
+          - "*"
+        update-types:
+          - major
+        group-by: dependency-name
+
   - package-ecosystem: pip
     directory: /deploy
     schedule:
       interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      routine-python-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      major-python-updates:
+        patterns:
+          - "*"
+        update-types:
+          - major
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      routine-actions-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      major-actions-updates:
+        patterns:
+          - "*"
+        update-types:
+          - major

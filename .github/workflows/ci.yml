@@ -94,6 +94,8 @@ jobs:
           retry npm --prefix "modules/${{ matrix.module }}" ci --prefer-offline --no-audit --fund=false
       - name: Build module
         run: npm --prefix "modules/${{ matrix.module }}" run build
+      - name: Smoke-test tsx runtime
+        run: npm --prefix "modules/${{ matrix.module }}" exec -- tsx --version
       - name: Test module
         if: matrix.module == 'registry' || matrix.module == 'router'
         run: node --test modules/${{ matrix.module }}/dist/*.test.js

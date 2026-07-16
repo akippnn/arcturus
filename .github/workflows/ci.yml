@@ -4,12 +4,25 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+
+env:
+  NPM_CONFIG_FETCH_RETRIES: '2'
+  NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '10000'
+  NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '30000'
+  NPM_CONFIG_FETCH_TIMEOUT: '60000'
+  PIP_DEFAULT_TIMEOUT: '120'
+  PIP_RETRIES: '5'
 
 jobs:
   python:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@v5
@@ -18,7 +31,23 @@ jobs:
           cache: pip
           cache-dependency-path: deploy/requirements.txt
       - name: Install runtime dependencies
-        run: python -m pip install --requirement deploy/requirements.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              if (( attempt == 3 )); then
+                return 1
+              fi
+              echo "Dependency install failed; retrying after $((attempt * 20)) seconds..." >&2
+              sleep $((attempt * 20))
+            done
+          }
+          retry python -m pip install --disable-pip-version-check --requirement deploy/requirements.txt
       - name: Compile and test control plane
         env:
           PYTHONPATH: deploy
@@ -29,40 +58,81 @@ jobs:
 
   node:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
-        module: [bus, registry, router]
+        module: [router, bus, registry]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: modules/${{ matrix.module }}/package-lock.json
-      - name: Install and build
+          cache-dependency-path: |
+            modules/bus/package-lock.json
+            modules/registry/package-lock.json
+            modules/router/package-lock.json
+      - name: Install dependencies
+        shell: bash
         run: |
-          npm --prefix "modules/${{ matrix.module }}" ci
-          npm --prefix "modules/${{ matrix.module }}" run build
-      - name: Test router
-        if: matrix.module == 'router'
-        run: npm --prefix modules/router test
+          set -euo pipefail
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              if (( attempt == 3 )); then
+                return 1
+              fi
+              echo "npm install failed; retrying after $((attempt * 20)) seconds..." >&2
+              sleep $((attempt * 20))
+            done
+          }
+          retry npm --prefix "modules/${{ matrix.module }}" ci --prefer-offline --no-audit --fund=false
+      - name: Build module
+        run: npm --prefix "modules/${{ matrix.module }}" run build
+      - name: Test module
+        if: matrix.module == 'registry' || matrix.module == 'router'
+        run: node --test modules/${{ matrix.module }}/dist/*.test.js
       - name: Audit production dependencies
-        run: npm --prefix "modules/${{ matrix.module }}" audit --audit-level=low
+        shell: bash
+        run: |
+          set -euo pipefail
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              if (( attempt == 3 )); then
+                return 1
+              fi
+              echo "npm audit failed; retrying after $((attempt * 20)) seconds..." >&2
+              sleep $((attempt * 20))
+            done
+          }
+          retry npm --prefix "modules/${{ matrix.module }}" audit --omit=dev --audit-level=low
 
   source-validation:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Test replayable host updates
         run: ./deploy/tests/test-host-update.sh
       - name: Shell syntax
         run: bash -n deploy/install-host.sh deploy/arcturus-host-update deploy/arcturusctl deploy/build-bundle.sh deploy/tests/test-host-update.sh
-      - name: Validate package metadata and examples
+      - name: Validate package metadata and lockfiles
+        shell: bash
         run: |
-          python -m json.tool modules/bus/package.json >/dev/null
-          python -m json.tool modules/registry/package.json >/dev/null
-          python -m json.tool modules/router/package.json >/dev/null
+          set -euo pipefail
+          for module in bus registry router; do
+            python -m json.tool "modules/$module/package.json" >/dev/null
+            python -m json.tool "modules/$module/package-lock.json" >/dev/null
+          done
       - name: Validate local Markdown links
         run: |
           python - <<'PY'

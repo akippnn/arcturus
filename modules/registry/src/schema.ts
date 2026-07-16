@@ -45,12 +45,12 @@ export const StackSchema = z.object({
   metadata: z.object({
     name: z.string().regex(/^[a-z0-9-]+$/),
     namespace: z.string().default("default"),
-    labels: z.record(z.string()).optional(),
-    annotations: z.record(z.string()).optional(),
+    labels: z.record(z.string(), z.string()).optional(),
+    annotations: z.record(z.string(), z.string()).optional(),
   }),
   spec: z.object({
-    services: z.record(ServiceSchema),
-    redirects: z.record(RedirectSchema).optional(),
+    services: z.record(z.string(), ServiceSchema),
+    redirects: z.record(z.string(), RedirectSchema).optional(),
     network: NetworkSchema.optional(),
     deploy: DeploySchema.optional(),
     security: SecuritySchema.optional(),
@@ -82,7 +82,7 @@ const ReleaseComponentSchema = z.object({
   containerName: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).nullable().optional(),
   mode: z.enum(["service", "oneshot", "scheduled"]).default("service"),
   command: z.array(z.string()).default([]),
-  environment: z.record(z.string()).default({}),
+  environment: z.record(z.string(), z.string()).default({}),
   secrets: z.array(SecretRefSchema).default([]),
   ports: z.array(z.object({
     container: z.number().int().min(1).max(65535),
@@ -109,10 +109,10 @@ const ReleaseComponentSchema = z.object({
   restart: z.enum(["always", "on-failure", "no"]).default("always"),
 }).strict().superRefine((component, context) => {
   if (component.mode === "scheduled" && !component.schedule) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ["schedule"], message: "scheduled components require schedule" });
+    context.addIssue({ code: "custom", path: ["schedule"], message: "scheduled components require schedule" });
   }
   if (component.mode !== "scheduled" && component.schedule) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ["schedule"], message: "schedule is only valid for scheduled components" });
+    context.addIssue({ code: "custom", path: ["schedule"], message: "schedule is only valid for scheduled components" });
   }
 });
 
@@ -125,12 +125,12 @@ export const ServiceReleaseSchema = z.object({
     deploymentId: z.string().uuid().optional(),
   }).strict(),
   spec: z.object({
-    components: z.record(ReleaseComponentSchema),
+    components: z.record(z.string(), ReleaseComponentSchema),
     networks: z.array(z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/),
       external: z.boolean().default(true),
     }).strict()).default([{ name: "internal_routing", external: true }]),
-    routing: z.record(z.object({
+    routing: z.record(z.string(), z.object({
       component: z.string(),
       port: z.number().int().min(1).max(65535),
       protocol: z.enum(["http", "https", "tcp", "udp"]).default("http"),

@@ -223,8 +223,15 @@ export class StackRegistry {
       const normalized = normalizeStack(result.data);
       const normalizedRaw = JSON.stringify(normalized, null, 2) + "\n";
       if (normalizedRaw !== raw) {
-        writeFileSync(path, normalizedRaw, "utf-8");
-        console.log(`Normalized manifest: ${path}`);
+        try {
+          writeFileSync(path, normalizedRaw, "utf-8");
+          console.log(`Normalized manifest: ${path}`);
+        } catch (err) {
+          console.warn(
+            `Loaded normalized manifest without writing read-only source ${path}:`,
+            (err as Error).message,
+          );
+        }
       }
 
       return normalized;

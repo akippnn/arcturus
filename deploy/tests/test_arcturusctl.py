@@ -24,6 +24,7 @@ def manifest() -> dict:
                     "image": f"registry.example.org/team/web@{'sha256:' + '0' * 64}",
                     "containerName": "multi-app-web",
                     "networks": ["internal_routing"],
+                    "healthCheck": {"command": "wget -q -O /dev/null http://127.0.0.1:3000/health"},
                 },
                 "db-init": {
                     "image": f"registry.example.org/team/web@{'sha256:' + '0' * 64}",
@@ -55,8 +56,13 @@ def project() -> dict:
             "provider": "gitea",
             "apiUrl": "http://192.0.2.10:9090",
             "storage": "isolated",
+            "testIntent": {"mode": "container-target"},
         },
-        "registry": {"host": "registry.example.org"},
+        "registry": {
+            "host": "registry.example.org",
+            "transportHost": "registry.internal.example.org:5000",
+            "transportTlsVerify": False,
+        },
         "builds": {
             "web": {
                 "repository": "registry.example.org/team/web",
@@ -88,6 +94,8 @@ class ProjectConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             definition, _, release = load_project(self.fixture(Path(temp_dir)))
             self.assertEqual(definition.builds["web"].components, ["web", "db-init"])
+            self.assertEqual(definition.ci.testIntent.mode, "container-target")
+            self.assertFalse(definition.registry.transportTlsVerify)
             self.assertEqual(release.spec.components["postgres"].image.split("@", 1)[1], FIXED_DIGEST)
 
     def test_render_reuses_one_digest_for_shared_components(self):

@@ -1,0 +1,9 @@
+[Unit]
+Description=Clean abandoned nested Buildah storage in idle CI runners
+After=podman.socket
+Wants=podman.socket
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/vps-runner-buildah-cleanup.sh
+TimeoutStartSec=15min

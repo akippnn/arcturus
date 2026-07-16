@@ -240,6 +240,23 @@ def get_release_deployer() -> ReleaseDeployer:
     return ReleaseDeployer.from_environment()
 
 
+@app.on_event("startup")
+def reconcile_active_releases() -> None:
+    try:
+        result = get_release_deployer().reconcile()
+        print(json.dumps({"event": "startup.reconciliation", **result}, sort_keys=True))
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "startup.reconciliation_failed",
+                    "error": redact(str(exc)),
+                },
+                sort_keys=True,
+            )
+        )
+
+
 def is_valid_domain(value: str) -> bool:
     if len(value) > 253 or value.endswith("."):
         return False
@@ -530,6 +547,12 @@ def get_deployment(
     if not result:
         raise HTTPException(404, "Deployment not found")
     return result
+
+
+@app.get("/v2/health")
+def get_aggregate_health(authorization: str | None = Header(None)):
+    verify_auth(authorization)
+    return get_release_deployer().health()
 
 
 @app.get("/v1/services/{service}/active")

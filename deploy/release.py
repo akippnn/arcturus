@@ -11,6 +11,7 @@ import subprocess
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Literal
 from urllib.parse import quote
@@ -30,6 +31,27 @@ ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SENSITIVE_RE = re.compile(
     r"(?i)(authorization|bearer|token|password|passwd|secret|api[_-]?key|registry[_-]?auth)"
 )
+BACKUP_SUCCESS_RE = re.compile(
+    r"^(?P<timestamp>\S+) \[INFO\] Off-site backup completed with 0 failure\(s\)\.$"
+)
+
+
+def latest_backup_success(path: Path) -> tuple[float, str] | None:
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        match = BACKUP_SUCCESS_RE.match(line)
+        if not match:
+            continue
+        raw_timestamp = match.group("timestamp")
+        try:
+            completed = datetime.fromisoformat(raw_timestamp)
+        except ValueError:
+            continue
+        return completed.timestamp(), raw_timestamp
+    return None
 
 
 def _validate_name(value: str, label: str = "name") -> str:
@@ -228,6 +250,14 @@ class RoutingService(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     websocket: bool = False
     maxBodySize: str = "1G"
+    readinessWaiver: str | None = None
+
+    @field_validator("readinessWaiver")
+    @classmethod
+    def validate_readiness_waiver(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or "\n" in value or len(value) > 256):
+            raise ValueError("readiness waiver must be a short, non-empty single line")
+        return value
 
     @field_validator("domains")
     @classmethod
@@ -261,6 +291,27 @@ class DeploymentPolicy(BaseModel):
     rollbackOnFailure: bool = True
 
 
+class LegacyComposeMigration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: str
+    cleanup: Literal["retain", "stop", "remove"] = "retain"
+    required: bool = False
+
+    @field_validator("project")
+    @classmethod
+    def validate_project(cls, value: str) -> str:
+        if not NETWORK_RE.fullmatch(value):
+            raise ValueError("legacy Compose project contains invalid characters")
+        return value
+
+
+class MigrationPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    legacyCompose: list[LegacyComposeMigration] = Field(default_factory=list)
+
+
 class ReleaseSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -270,6 +321,7 @@ class ReleaseSpec(BaseModel):
     )
     routing: dict[str, RoutingService] = Field(default_factory=dict)
     deployment: DeploymentPolicy = Field(default_factory=DeploymentPolicy)
+    migration: MigrationPolicy | None = None
 
     @model_validator(mode="after")
     def validate_references(self) -> "ReleaseSpec":
@@ -298,6 +350,13 @@ class ReleaseSpec(BaseModel):
                 raise ValueError(f"route {name} references missing component {route.component}")
             if self.components[route.component].mode != "service":
                 raise ValueError(f"route {name} must reference a long-running service component")
+            if (
+                self.components[route.component].healthCheck is None
+                and route.readinessWaiver is None
+            ):
+                raise ValueError(
+                    f"public route {name} requires application readiness or readinessWaiver"
+                )
         self._check_cycles()
         return self
 
@@ -451,6 +510,25 @@ class PodmanClient:
                 )
             return response.json()
 
+    def containers(self, all_containers: bool = True) -> list[dict[str, Any]]:
+        with self._client(30) as client:
+            response = client.get("/containers/json", params={"all": all_containers})
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Podman container listing failed ({response.status_code}): {redact(response.text)}"
+                )
+            return response.json()
+
+    def inspect_container(self, container: str) -> dict[str, Any]:
+        encoded = quote(container, safe="")
+        with self._client(30) as client:
+            response = client.get(f"/containers/{encoded}/json")
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Podman container inspect failed ({response.status_code}): {redact(response.text)}"
+                )
+            return response.json()
+
 
 class DeploymentStore:
     def __init__(self, path: Path):
@@ -524,6 +602,15 @@ class DeploymentStore:
                 (service,),
             ).fetchone()
         return self._row(row)
+
+    def active_services(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT d.* FROM deployments d
+                   JOIN active_releases a ON a.deployment_id=d.id
+                   ORDER BY a.service"""
+            ).fetchall()
+        return [record for row in rows if (record := self._row(row)) is not None]
 
     def get(self, deployment_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -948,7 +1035,13 @@ class ReleaseDeployer:
                 images = self._pull_and_verify(request.manifest)
                 units = self.renderer.render(request.manifest, quadlets)
                 self._validate_quadlets(quadlets)
-                self._activate(request.service, release_path, units, request.manifest.spec.deployment.timeoutSeconds)
+                self._activate(
+                    request.service,
+                    release_path,
+                    units,
+                    request.manifest.spec.deployment.timeoutSeconds,
+                    request.manifest,
+                )
                 self._run_scheduled_on_deploy(request.manifest)
                 self._publish_manifest(request.service, request.manifest, deployment_id)
                 routing = self._wait_for_routing(
@@ -1010,6 +1103,238 @@ class ReleaseDeployer:
     def operation(self, operation_id: str) -> dict[str, Any] | None:
         record = self.store.get_operation(operation_id)
         return redact(record) if record else None
+
+    def reconcile(self) -> dict[str, Any]:
+        containers: list[dict[str, Any]] = []
+        inventory_error: str | None = None
+        try:
+            containers = self.podman.containers(all_containers=True)
+        except Exception as exc:
+            inventory_error = str(redact(str(exc)))
+        services: dict[str, Any] = {}
+        for record in self.store.active_services():
+            service = record["service"]
+            deployment_id = record["id"]
+            manifest = ServiceRelease.model_validate(record["manifest"])
+            desired_state = self.store.desired_state(service)
+            release_path = self.release_dir / service / deployment_id
+            expected_quadlet = release_path / "quadlet"
+            active_link = self.quadlet_dir / service
+            active_manifest = self.active_manifest_dir / service / "arcturus.json"
+            target = f"arcturus-{service}.target"
+            target_status = self.runner.run(
+                ["systemctl", "--user", "is-active", target],
+                timeout=15,
+                check=False,
+            ).stdout.strip() or "inactive"
+            checks = {
+                "releaseArchive": release_path.is_dir(),
+                "quadletArchive": expected_quadlet.is_dir(),
+                "quadletLink": (
+                    active_link.is_symlink()
+                    and active_link.resolve() == expected_quadlet.resolve()
+                ),
+                "targetFile": (self.systemd_dir / target).is_file(),
+                "activeManifest": active_manifest.is_file(),
+                "targetActive": target_status == "active",
+            }
+            routing = self._routing_state(manifest, deployment_id)
+            checks["routingReceipt"] = (
+                not manifest.spec.routing
+                or (
+                    routing.get("status") == "published"
+                    and routing.get("revision") == manifest.metadata.revision
+                    and routing.get("deploymentId") == deployment_id
+                    and bool(routing.get("configDigest"))
+                    and routing.get("verification", {}).get("status") == "passed"
+                )
+            )
+            conflicts: list[dict[str, Any]] = []
+            for component_name, component in manifest.spec.components.items():
+                expected_name = component.containerName or f"arcturus-{service}-{component_name}"
+                for container in containers:
+                    names = container.get("Names") or []
+                    if expected_name not in names:
+                        continue
+                    labels = container.get("Labels") or {}
+                    owner_matches = (
+                        labels.get("io.u128.arcturus.service") == service
+                        and labels.get("io.u128.arcturus.revision") == manifest.metadata.revision
+                    )
+                    running = container.get("State") == "running"
+                    if (desired_state == "enabled" and not owner_matches) or (
+                        desired_state != "enabled" and running
+                    ):
+                        conflicts.append(
+                            {
+                                "component": component_name,
+                                "container": expected_name,
+                                "state": container.get("State"),
+                                "owner": labels.get("io.u128.arcturus.service") or "legacy",
+                            }
+                        )
+            expected_checks = (
+                all(checks.values())
+                if desired_state == "enabled"
+                else not checks["targetActive"] and not checks["activeManifest"]
+            )
+            services[service] = {
+                "deploymentId": deployment_id,
+                "revision": manifest.metadata.revision,
+                "desiredState": desired_state,
+                "targetStatus": target_status,
+                "checks": checks,
+                "ownershipConflicts": conflicts,
+                "status": "consistent" if expected_checks and not conflicts else "conflict",
+            }
+        failures = sorted(
+            service for service, state in services.items() if state["status"] != "consistent"
+        )
+        return redact(
+            {
+                "status": "consistent" if not failures and not inventory_error else "conflict",
+                "services": services,
+                "failed": failures,
+                **({"inventoryError": inventory_error} if inventory_error else {}),
+            }
+        )
+
+    def health(self) -> dict[str, Any]:
+        reconciliation = self.reconcile()
+        critical_units = [
+            item
+            for item in os.getenv(
+                "ARCTURUS_CRITICAL_UNITS",
+                "arcturus-podman-api.service,arcturus-bus.service,arcturus-registry.service,"
+                "arcturus-router.service,arcturus-deployer@127.0.0.1.service",
+            ).split(",")
+            if item
+        ]
+        control_plane: dict[str, str] = {}
+        for unit in critical_units:
+            result = self.runner.run(
+                ["systemctl", "--user", "is-active", unit],
+                timeout=15,
+                check=False,
+            )
+            control_plane[unit] = result.stdout.strip() or "inactive"
+        services: dict[str, Any] = {}
+        for record in self.store.active_services():
+            service = record["service"]
+            manifest = ServiceRelease.model_validate(record["manifest"])
+            desired_state = self.store.desired_state(service)
+            unit_names = self._record_units(service, record["id"])
+            units: dict[str, str] = {}
+            for unit in unit_names:
+                result = self.runner.run(
+                    ["systemctl", "--user", "is-active", unit],
+                    timeout=15,
+                    check=False,
+                )
+                units[unit] = result.stdout.strip() or "inactive"
+            routing = self._routing_state(manifest, record["id"])
+            live_healthy = (
+                desired_state != "enabled"
+                or (
+                    all(status == "active" for status in units.values())
+                    and (
+                        not manifest.spec.routing
+                        or (
+                            routing.get("status") == "published"
+                            and bool(routing.get("configDigest"))
+                            and routing.get("verification", {}).get("status") == "passed"
+                        )
+                    )
+                )
+            )
+            services[service] = {
+                "status": "healthy" if live_healthy else "unhealthy",
+                "desiredState": desired_state,
+                "deploymentId": record["id"],
+                "revision": manifest.metadata.revision,
+                "units": units,
+                "routing": routing,
+            }
+        backup: dict[str, Any] = {"configured": False}
+        if backup_unit := os.getenv("ARCTURUS_BACKUP_UNIT"):
+            result = self.runner.run(
+                [
+                    "systemctl",
+                    "--user",
+                    "show",
+                    backup_unit,
+                    "-p",
+                    "Result",
+                    "-p",
+                    "ExecMainStatus",
+                    "-p",
+                    "ExecMainExitTimestamp",
+                ],
+                timeout=15,
+                check=False,
+            )
+            properties = dict(
+                line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+            )
+            completed_at = properties.get("ExecMainExitTimestamp") or None
+            age_seconds: float | None = None
+            timestamp_source = "systemd" if completed_at else None
+            backup_log = Path(
+                os.getenv(
+                    "ARCTURUS_BACKUP_LOG",
+                    str(Path.home() / ".local/state/vps-rclone-backup/backup.log"),
+                )
+            ).expanduser()
+            fallback = latest_backup_success(backup_log)
+            if fallback:
+                completed_epoch, completed_at = fallback
+                age_seconds = max(0.0, time.time() - completed_epoch)
+                timestamp_source = "success-log"
+            max_age_hours = float(os.getenv("ARCTURUS_BACKUP_MAX_AGE_HOURS", "24"))
+            backup_is_fresh = (
+                age_seconds is not None and age_seconds <= max_age_hours * 3600
+            )
+            backup = {
+                "configured": True,
+                "unit": backup_unit,
+                "status": (
+                    "healthy"
+                    if properties.get("Result") == "success"
+                    and properties.get("ExecMainStatus", "0") == "0"
+                    and backup_is_fresh
+                    else "unhealthy"
+                ),
+                "completedAt": completed_at,
+                "ageSeconds": age_seconds,
+                "timestampSource": timestamp_source,
+            }
+        healthy = (
+            all(status == "active" for status in control_plane.values())
+            and all(service["status"] == "healthy" for service in services.values())
+            and reconciliation.get("status") == "consistent"
+            and (not backup.get("configured") or backup.get("status") == "healthy")
+        )
+        return redact(
+            {
+                "status": "healthy" if healthy else "degraded",
+                "controlPlane": control_plane,
+                "services": services,
+                "reconciliation": reconciliation,
+                "backup": backup,
+                "checkedAt": int(time.time()),
+            }
+        )
+
+    def _record_units(self, service: str, deployment_id: str) -> list[str]:
+        quadlets = self.release_dir / service / deployment_id / "quadlet"
+        timer_bases = {path.name.removesuffix(".timer") for path in quadlets.glob("*.timer")}
+        units = [path.name for path in quadlets.glob("*.timer")]
+        units.extend(
+            path.name.removesuffix(".container") + ".service"
+            for path in quadlets.glob("*.container")
+            if path.name.removesuffix(".container") not in timer_bases
+        )
+        return sorted(units)
 
     def rollback(self, service: str, deployment_id: str | None = None) -> dict[str, Any]:
         with self.lock(service):
@@ -1221,8 +1546,21 @@ class ReleaseDeployer:
         record = payload.get("services", {}).get(manifest.metadata.name)
         if not isinstance(record, dict) or record.get("revision") != manifest.metadata.revision:
             return {"required": True, "status": "pending"}
-        if deployment_id and record.get("deploymentId") not in {None, deployment_id}:
+        if deployment_id and record.get("deploymentId") != deployment_id:
             return {"required": True, "status": "pending"}
+        if record.get("status") == "published" and (
+            not record.get("configDigest")
+            or record.get("verification", {}).get("status") != "passed"
+        ):
+            return {
+                "required": True,
+                **record,
+                "status": "failed",
+                "error": {
+                    "code": "routing_verification_incomplete",
+                    "message": "published receipt lacks a digest or successful upstream verification",
+                },
+            }
         return redact({"required": True, **record})
 
     def _wait_for_routing(
@@ -1230,30 +1568,40 @@ class ReleaseDeployer:
         manifest: ServiceRelease,
         timeout: int,
         deployment_id: str | None = None,
+        retry_failed_receipts: bool = False,
     ) -> dict[str, Any]:
         state = self._routing_state(manifest, deployment_id)
         if not state["required"] or self.route_status_file is None:
             return state
-        baseline_applied_at = state.get("appliedAt")
         self._request_registry_rescan()
         deadline = time.monotonic() + timeout
+        failed_since: float | None = None
+        next_failed_rescan = 0.0
         while time.monotonic() < deadline:
             state = self._routing_state(manifest, deployment_id)
             receipt_is_current = (
                 not deployment_id
                 or state.get("deploymentId") == deployment_id
-                or (
-                    "deploymentId" not in state
-                    and state.get("appliedAt") != baseline_applied_at
-                )
             )
             if state.get("status") == "published" and receipt_is_current:
                 return state
             if state.get("status") == "failed" and receipt_is_current:
+                if retry_failed_receipts:
+                    now = time.monotonic()
+                    if failed_since is None:
+                        failed_since = now
+                    if now - failed_since < min(timeout, 60):
+                        if now >= next_failed_rescan:
+                            self._request_registry_rescan()
+                            next_failed_rescan = now + 5
+                        time.sleep(0.5)
+                        continue
                 raise RuntimeError(
                     f"router failed to publish {manifest.metadata.name}: "
                     f"{state.get('error', {}).get('message', 'unknown routing error')}"
                 )
+            failed_since = None
+            next_failed_rescan = 0.0
             time.sleep(0.25)
         raise TimeoutError(f"router publication timed out for {manifest.metadata.name}")
 
@@ -1301,6 +1649,7 @@ class ReleaseDeployer:
             release_path,
             sorted(units),
             manifest.spec.deployment.timeoutSeconds,
+            manifest,
         )
         self._run_scheduled_on_deploy(manifest)
         self._publish_manifest(service, manifest, record["id"])
@@ -1308,6 +1657,7 @@ class ReleaseDeployer:
             manifest,
             manifest.spec.deployment.timeoutSeconds,
             record["id"],
+            retry_failed_receipts=True,
         )
         return {
             "deployment_id": record["id"],
@@ -1322,7 +1672,31 @@ class ReleaseDeployer:
         audit("service.operation.failed", operation_id=operation_id, error=error)
         raise RuntimeError(error["message"]) from exc
 
-    def _activate(self, service: str, release_path: Path, units: list[str], timeout: int) -> None:
+    def _activate(
+        self,
+        service: str,
+        release_path: Path,
+        units: list[str],
+        timeout: int,
+        manifest: ServiceRelease | None = None,
+    ) -> None:
+        health_containers = {
+            f"arcturus-{service}-{name}.service": component.containerName
+            for name, component in (manifest.spec.components.items() if manifest else [])
+            if component.mode == "service" and component.healthCheck is not None
+        }
+        previous_invocations: dict[str, str] = {}
+        for unit in units:
+            result = self.runner.run(
+                ["systemctl", "--user", "show", unit, "-p", "InvocationID"],
+                timeout=15,
+                check=False,
+            )
+            properties = dict(
+                line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+            )
+            previous_invocations[unit] = properties.get("InvocationID", "")
+
         active_link = self.quadlet_dir / service
         temp_link = self.quadlet_dir / f".{service}.{uuid.uuid4().hex}.tmp"
         temp_link.symlink_to(release_path / "quadlet", target_is_directory=True)
@@ -1342,12 +1716,62 @@ class ReleaseDeployer:
         self.runner.run(
             ["systemctl", "--user", "restart", f"arcturus-{service}.target"], timeout=timeout
         )
-        for unit in units:
-            result = self.runner.run(
-                ["systemctl", "--user", "is-active", unit], timeout=15, check=False
+        pending = set(units)
+        deadline = time.monotonic() + timeout
+        while pending and time.monotonic() < deadline:
+            for unit in sorted(pending):
+                details = self.runner.run(
+                    [
+                        "systemctl",
+                        "--user",
+                        "show",
+                        unit,
+                        "-p",
+                        "ActiveState",
+                        "-p",
+                        "InvocationID",
+                    ],
+                    timeout=15,
+                    check=False,
+                )
+                properties = dict(
+                    line.split("=", 1)
+                    for line in details.stdout.splitlines()
+                    if "=" in line
+                )
+                active_state = properties.get("ActiveState", "")
+                invocation = properties.get("InvocationID", "")
+                if active_state == "failed":
+                    raise RuntimeError(f"unit failed during activation: {unit}")
+                if not active_state:
+                    fallback = self.runner.run(
+                        ["systemctl", "--user", "is-active", unit],
+                        timeout=15,
+                        check=False,
+                    )
+                    active_state = fallback.stdout.strip()
+                if active_state != "active" and unit in health_containers:
+                    try:
+                        container = self.podman.inspect_container(health_containers[unit])
+                    except Exception:
+                        container = {}
+                    health_status = (
+                        container.get("State", {}).get("Health", {}).get("Status")
+                    )
+                    if health_status == "unhealthy":
+                        raise RuntimeError(
+                            f"container became unhealthy during activation: {health_containers[unit]}"
+                        )
+                prior = previous_invocations.get(unit, "")
+                restarted = not prior or (invocation and invocation != prior)
+                if active_state == "active" and restarted:
+                    pending.remove(unit)
+            if pending:
+                time.sleep(0.25)
+        if pending:
+            raise RuntimeError(
+                "units did not complete activation: " + ", ".join(sorted(pending))
             )
-            if result.returncode != 0 or result.stdout.strip() != "active":
-                raise RuntimeError(f"unit did not become active: {unit}")
 
     def _rollback(self, service: str, previous: dict[str, Any] | None) -> dict[str, Any]:
         if previous is None:

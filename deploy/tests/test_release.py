@@ -162,6 +162,16 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ServiceRelease.model_validate(raw)
 
+    def test_accepts_additive_legacy_compose_migration_policy(self):
+        raw = manifest()
+        raw["spec"]["migration"] = {
+            "legacyCompose": [
+                {"project": "legacy_portal", "cleanup": "retain", "required": False}
+            ]
+        }
+        release = ServiceRelease.model_validate(raw)
+        self.assertEqual(release.spec.migration.legacyCompose[0].project, "legacy_portal")
+
 
 class RendererTests(unittest.TestCase):
     def test_accepts_existing_named_volume_with_compose_underscore(self):
@@ -268,6 +278,7 @@ class DeployerTests(unittest.TestCase):
                     "upstreams": ["example-portal:80"],
                     "configDigest": DIGEST_A,
                     "appliedAt": "2026-07-13T00:00:00Z",
+                    "verification": {"status": "passed", "routes": []},
                     **({"error": {"code": "nginx_apply_failed", "message": "invalid nginx"}} if failed else {}),
                 }
             },
@@ -293,6 +304,48 @@ class DeployerTests(unittest.TestCase):
                 runner.commands,
             )
 
+    def test_activation_waits_for_replacement_unit_invocation(self):
+        class InvocationRunner(FakeRunner):
+            def __init__(self):
+                super().__init__()
+                self.restarted = False
+                self.activation_checks = 0
+
+            def run(self, command, *, timeout=120, env=None, check=True):
+                if command[:3] == ["systemctl", "--user", "show"]:
+                    self.commands.append(command)
+                    if not self.restarted:
+                        stdout = "InvocationID=old-invocation\n"
+                    else:
+                        self.activation_checks += 1
+                        if self.activation_checks == 1:
+                            stdout = "ActiveState=activating\nInvocationID=old-invocation\n"
+                        else:
+                            stdout = "ActiveState=active\nInvocationID=new-invocation\n"
+                    return subprocess.CompletedProcess(command, 0, stdout, "")
+                result = super().run(command, timeout=timeout, env=env, check=check)
+                if command[:3] == ["systemctl", "--user", "restart"]:
+                    self.restarted = True
+                return result
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            runner = InvocationRunner()
+            deployer = self.make_deployer(base, runner)
+            release_path = base / "release"
+            quadlets = release_path / "quadlet"
+            quadlets.mkdir(parents=True)
+            (quadlets / "arcturus-example.target").write_text(
+                "[Unit]\nDescription=example\n"
+            )
+            deployer._activate(
+                "example",
+                release_path,
+                ["arcturus-example-web.service"],
+                5,
+            )
+            self.assertGreaterEqual(runner.activation_checks, 2)
+
     def test_active_response_includes_matching_router_receipt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
@@ -307,6 +360,7 @@ class DeployerTests(unittest.TestCase):
                         "upstreams": ["example-portal:80"],
                         "configDigest": DIGEST_A,
                         "appliedAt": "2026-07-13T00:00:00Z",
+                        "verification": {"status": "passed", "routes": []},
                     }
                 },
             }))
@@ -373,6 +427,54 @@ class DeployerTests(unittest.TestCase):
                 self.assertRaises(TimeoutError),
             ):
                 deployer._wait_for_routing(self.request().manifest, 60, "new-deployment")
+
+    def test_rollback_route_publication_retries_transient_failed_receipt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            deployer, status = self.route_deployer(base, FakeRunner())
+            calls = 0
+
+            def rescan():
+                nonlocal calls
+                calls += 1
+                published = calls > 1
+                status.write_text(json.dumps({
+                    "version": 1,
+                    "services": {
+                        "example-portal": {
+                            "status": "published" if published else "failed",
+                            "revision": COMMIT_A,
+                            "deploymentId": "restored-deployment",
+                            "domains": ["example.org"],
+                            "upstreams": ["example-portal:80"],
+                            "configDigest": DIGEST_A,
+                            "verification": {
+                                "status": "passed" if published else "failed",
+                                "routes": [],
+                            },
+                            **(
+                                {}
+                                if published
+                                else {
+                                    "error": {
+                                        "code": "upstream_unreachable",
+                                        "message": "route runtime verification failed",
+                                    }
+                                }
+                            ),
+                        }
+                    },
+                }))
+
+            deployer._request_registry_rescan = rescan
+            receipt = deployer._wait_for_routing(
+                self.request().manifest,
+                60,
+                "restored-deployment",
+                retry_failed_receipts=True,
+            )
+            self.assertEqual(receipt["status"], "published")
+            self.assertGreaterEqual(calls, 2)
 
     def test_failed_second_release_rolls_back_first(self):
         with tempfile.TemporaryDirectory() as temp_dir:

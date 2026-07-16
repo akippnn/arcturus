@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically clean abandoned nested runner Buildah storage
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+RandomizedDelaySec=2min
+Persistent=true
+Unit=vps-runner-buildah-cleanup.service
+
+[Install]
+WantedBy=timers.target

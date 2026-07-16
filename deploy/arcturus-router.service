@@ -13,7 +13,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%t/arcturus %h/stacks
+ReadWritePaths=%t/arcturus %t/libpod %t/containers %h/stacks
 
 [Install]
 WantedBy=default.target

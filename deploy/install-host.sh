@@ -18,7 +18,9 @@ Usage: install-host.sh [options]
   --nginx-container NAME     Portal nginx container (default: portal-nginx)
   --base-domain DOMAIN       Router-managed base domain
   --cert-domain DOMAIN       TLS certificate domain (default: base domain)
-  --container-cli podman     Container CLI used by the router
+  --apex-service SERVICE     Only service authorized to publish the base domain
+  --backup-unit UNIT         User backup service included in aggregate health
+  --container-cli CLIENT     podman or podman-remote (recommended with service sandboxing)
   --configure-firewall        Add a source-scoped firewalld rule for port 9090
   --validate-only             Validate inputs and prerequisites without writing
   --dry-run                   Print the resolved installation without writing
@@ -38,6 +40,8 @@ VHOSTS_DIR=""
 NGINX_CONTAINER="portal-nginx"
 BASE_DOMAIN=""
 CERT_DOMAIN=""
+APEX_SERVICE=""
+BACKUP_UNIT=""
 CONTAINER_CLI="podman"
 CONFIGURE_FIREWALL=false
 VALIDATE_ONLY=false
@@ -60,6 +64,8 @@ while (($#)); do
     --nginx-container) NGINX_CONTAINER="$2"; shift 2 ;;
     --base-domain) BASE_DOMAIN="$2"; shift 2 ;;
     --cert-domain) CERT_DOMAIN="$2"; shift 2 ;;
+    --apex-service) APEX_SERVICE="$2"; shift 2 ;;
+    --backup-unit) BACKUP_UNIT="$2"; shift 2 ;;
     --container-cli) CONTAINER_CLI="$2"; shift 2 ;;
     --configure-firewall) CONFIGURE_FIREWALL=true; shift ;;
     --validate-only) VALIDATE_ONLY=true; shift ;;
@@ -98,16 +104,20 @@ fi
 [[ "$HOST_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || errors+=("invalid --host-user: $HOST_USER")
 [[ -z "$HOST_HOME_OVERRIDE" || "$HOST_HOME_OVERRIDE" == /* ]] || errors+=("--host-home must be absolute")
 [[ "$NETWORK" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || errors+=("invalid --network: $NETWORK")
+[[ -z "$APEX_SERVICE" || "$APEX_SERVICE" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || errors+=("invalid --apex-service: $APEX_SERVICE")
 if [[ -n "$LISTEN_ADDRESS" && "$LISTEN_ADDRESS" =~ ^(0\.0\.0\.0|::)$ ]]; then
   errors+=("unrestricted deployer listener is forbidden: $LISTEN_ADDRESS")
 fi
 if [[ -n "$LISTEN_ADDRESS" ]] && ! "$PYTHON_BIN" - "$LISTEN_ADDRESS" <<'PY'
 import ipaddress, sys
 address = ipaddress.ip_address(sys.argv[1])
-raise SystemExit(0 if address.is_private or address.is_loopback else 1)
+tailscale_cgnat = ipaddress.ip_network("100.64.0.0/10")
+raise SystemExit(
+    0 if address.is_private or address.is_loopback or address in tailscale_cgnat else 1
+)
 PY
 then
-  errors+=("--listen-address must be a private or loopback IP address")
+  errors+=("--listen-address must be a private, loopback, or Tailscale CGNAT IP address")
 fi
 if [[ -n "$RUNNER_CIDR" ]] && ! "$PYTHON_BIN" - "$RUNNER_CIDR" <<'PY'
 import ipaddress, sys
@@ -128,7 +138,8 @@ fi
 if [[ -n "$SOURCE_DIR" ]]; then
   for file in app.py release.py arcturusctl.py arcturus-deployer@.service \
     arcturus-podman-api.service arcturus-bus.service arcturus-registry.service \
-    arcturus-router.service; do
+    arcturus-router.service vps-runner-buildah-cleanup.sh \
+    vps-runner-buildah-cleanup.service vps-runner-buildah-cleanup.timer; do
     [[ -f "$SOURCE_DIR/$file" ]] || errors+=("source artifact is missing: $SOURCE_DIR/$file")
   done
   source_root_check="$(cd "$SOURCE_DIR/.." 2>/dev/null && pwd || true)"
@@ -137,7 +148,8 @@ if [[ -n "$SOURCE_DIR" ]]; then
       errors+=("compiled module is missing: modules/$module/dist/index.js")
   done
 fi
-[[ "$CONTAINER_CLI" == podman ]] || errors+=("--container-cli must be podman")
+[[ "$CONTAINER_CLI" =~ ^podman(-remote)?$ ]] || errors+=("--container-cli must be podman or podman-remote")
+command -v "$CONTAINER_CLI" >/dev/null 2>&1 || errors+=("missing prerequisite: $CONTAINER_CLI")
 [[ "$NGINX_CONTAINER" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || errors+=("invalid --nginx-container")
 if $CONFIGURE_FIREWALL && [[ -z "$RUNNER_CIDR" || -z "$LISTEN_ADDRESS" ]]; then
   errors+=("--configure-firewall requires --listen-address and --runner-cidr")
@@ -178,6 +190,7 @@ CONFIG_DIR="$HOST_HOME/.config/arcturus"
 UNIT_DIR="$HOST_HOME/.config/systemd/user"
 QUADLET_DIR="$HOST_HOME/.config/containers/systemd/arcturus"
 BIN_DIR="$HOST_HOME/.local/bin"
+HOST_BIN_DIR="$HOST_HOME/bin"
 RUNTIME_DIR="/run/user/$HOST_UID/arcturus"
 CONFIG_FILE="$CONFIG_DIR/deployer.env"
 PLATFORM_CONFIG_FILE="$CONFIG_DIR/platform.env"
@@ -207,7 +220,8 @@ $VALIDATE_ONLY && exit 0
 $DRY_RUN && exit 0
 
 umask 077
-mkdir -p "$STATE_DIR/releases" "$STATE_DIR/active-manifests" "$CONFIG_DIR" "$UNIT_DIR" "$QUADLET_DIR" "$BIN_DIR" "$RUNTIME_DIR"
+mkdir -p "$STATE_DIR/releases" "$STATE_DIR/active-manifests" "$CONFIG_DIR" "$UNIT_DIR" \
+  "$QUADLET_DIR" "$BIN_DIR" "$HOST_BIN_DIR" "$RUNTIME_DIR"
 staging="$(mktemp -d "$STATE_DIR/releases/.install.XXXXXX")"
 container_id=""
 rendered_config=""
@@ -221,10 +235,13 @@ trap cleanup EXIT
 if [[ -n "$SOURCE_DIR" ]]; then
   for file in app.py release.py arcturusctl.py requirements.txt \
     arcturus-deployer@.service arcturus-podman-api.service arcturus-bus.service \
-    arcturus-registry.service arcturus-router.service arcturusctl; do
+    arcturus-registry.service arcturus-router.service arcturusctl \
+    vps-runner-buildah-cleanup.sh vps-runner-buildah-cleanup.service \
+    vps-runner-buildah-cleanup.timer; do
     install -m 0644 "$SOURCE_DIR/$file" "$staging/$file"
   done
-  chmod 0755 "$staging/arcturusctl" "$staging/arcturusctl.py"
+  chmod 0755 "$staging/arcturusctl" "$staging/arcturusctl.py" \
+    "$staging/vps-runner-buildah-cleanup.sh"
   if [[ -d "$SOURCE_DIR/wheelhouse" ]]; then
     cp -a "$SOURCE_DIR/wheelhouse" "$staging/wheelhouse"
   fi
@@ -280,6 +297,7 @@ PODMAN_SOCKET=$RUNTIME_DIR/podman.sock
 RUNNER_TOKENS_FILE=$CONFIG_DIR/tokens.json
 ARCTURUS_ROUTER_STATUS_FILE=$RUNTIME_DIR/router-status.json
 ARCTURUS_REGISTRY_SOCKET=$RUNTIME_DIR/registry.sock
+ARCTURUS_BACKUP_UNIT=$BACKUP_UNIT
 EOF
 if [[ ! -f "$CONFIG_FILE" || $FORCE_CONFIG == true ]]; then
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -304,6 +322,8 @@ NGINX_CONTAINER=$NGINX_CONTAINER
 BASE_DOMAIN=$BASE_DOMAIN
 CERT_DOMAIN=$CERT_DOMAIN
 CONTAINER_CLI=$CONTAINER_CLI
+CONTAINER_HOST=unix://$RUNTIME_DIR/podman.sock
+ARCTURUS_APEX_SERVICE=$APEX_SERVICE
 EOF
 if [[ ! -f "$PLATFORM_CONFIG_FILE" || $FORCE_CONFIG == true ]]; then
   [[ ! -f "$PLATFORM_CONFIG_FILE" ]] || cp -a "$PLATFORM_CONFIG_FILE" "$PLATFORM_CONFIG_FILE.backup.$(date -u +%Y%m%dT%H%M%SZ)"
@@ -319,6 +339,10 @@ install -m 0644 "$release_path/arcturus-podman-api.service" "$UNIT_DIR/arcturus-
 install -m 0644 "$release_path/arcturus-bus.service" "$UNIT_DIR/arcturus-bus.service"
 install -m 0644 "$release_path/arcturus-registry.service" "$UNIT_DIR/arcturus-registry.service"
 install -m 0644 "$release_path/arcturus-router.service" "$UNIT_DIR/arcturus-router.service"
+install -m 0644 "$release_path/vps-runner-buildah-cleanup.service" \
+  "$UNIT_DIR/vps-runner-buildah-cleanup.service"
+install -m 0644 "$release_path/vps-runner-buildah-cleanup.timer" \
+  "$UNIT_DIR/vps-runner-buildah-cleanup.timer"
 mkdir -p "$UNIT_DIR/arcturus-router.service.d"
 router_paths="$(mktemp)"
 cat >"$router_paths" <<EOF
@@ -328,6 +352,8 @@ EOF
 install -m 0644 "$router_paths" "$UNIT_DIR/arcturus-router.service.d/10-vhosts.conf"
 rm -f "$router_paths"
 install -m 0755 "$release_path/arcturusctl" "$BIN_DIR/arcturusctl"
+install -m 0755 "$release_path/vps-runner-buildah-cleanup.sh" \
+  "$HOST_BIN_DIR/vps-runner-buildah-cleanup.sh"
 
 podman network exists "$NETWORK" || podman network create "$NETWORK" >/dev/null
 if command -v loginctl >/dev/null 2>&1 && [[ "$(loginctl show-user "$HOST_USER" -p Linger --value 2>/dev/null || true)" != true ]]; then
@@ -336,6 +362,7 @@ fi
 systemctl --user daemon-reload
 systemctl --user enable --now arcturus-podman-api.service
 systemctl --user enable --now arcturus-bus.service arcturus-registry.service
+systemctl --user enable --now vps-runner-buildah-cleanup.timer
 if [[ -n "$BASE_DOMAIN" ]]; then
   systemctl --user enable --now arcturus-router.service
 else

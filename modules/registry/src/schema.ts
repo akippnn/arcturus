@@ -138,11 +138,19 @@ export const ServiceReleaseSchema = z.object({
       aliases: z.array(z.string()).default([]),
       websocket: z.boolean().default(false),
       maxBodySize: z.string().default("1G"),
+      readinessWaiver: z.string().min(1).max(256).optional(),
     }).strict()).default({}),
     deployment: z.object({
       timeoutSeconds: z.number().int().min(10).max(1800).default(300),
       rollbackOnFailure: z.boolean().default(true),
     }).strict().default({ timeoutSeconds: 300, rollbackOnFailure: true }),
+    migration: z.object({
+      legacyCompose: z.array(z.object({
+        project: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/),
+        cleanup: z.enum(["retain", "stop", "remove"]).default("retain"),
+        required: z.boolean().default(false),
+      }).strict()).default([]),
+    }).strict().optional(),
   }).strict(),
 }).strict();
 

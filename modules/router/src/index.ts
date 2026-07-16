@@ -16,7 +16,7 @@ const CONFIG = {
   registrySocket: process.env.REGISTRY_SOCKET || `${runtimeDir}/arcturus/registry.sock`,
   busSocket: process.env.BUS_SOCKET || `${runtimeDir}/arcturus/bus.sock`,
   statusFile: process.env.ROUTER_STATUS_FILE || `${runtimeDir}/arcturus/router-status.json`,
-  containerCli: (process.env.CONTAINER_CLI || "podman") as "podman" | "docker",
+  containerCli: (process.env.CONTAINER_CLI || "podman") as "podman" | "podman-remote" | "docker",
 };
 
 async function main() {
@@ -77,10 +77,10 @@ async function main() {
 
 async function fullReapply(router: Router, networkMgr: NetworkManager): Promise<void> {
   const stacks = await router.fetchStacks();
-  await router.apply(stacks);
   for (const stack of stacks) {
     await applyNetwork(stack, networkMgr);
   }
+  await router.apply(stacks);
 }
 
 async function applyNetwork(stack: any, networkMgr: NetworkManager): Promise<void> {

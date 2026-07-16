@@ -6,16 +6,19 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import http.client
 import json
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,6 +30,27 @@ REPOSITORY_RE = re.compile(
     r"^[a-z0-9][a-z0-9._-]*(?::[0-9]+)?(?:/[a-z0-9._-]+)+$"
 )
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+BACKUP_SUCCESS_RE = re.compile(
+    r"^(?P<timestamp>\S+) \[INFO\] Off-site backup completed with 0 failure\(s\)\.$"
+)
+
+
+def latest_backup_success(path: Path) -> tuple[float, str] | None:
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        match = BACKUP_SUCCESS_RE.match(line)
+        if not match:
+            continue
+        raw_timestamp = match.group("timestamp")
+        try:
+            completed = datetime.fromisoformat(raw_timestamp)
+        except ValueError:
+            continue
+        return completed.timestamp(), raw_timestamp
+    return None
 
 
 class ProjectBuild(BaseModel):
@@ -63,6 +87,21 @@ class ProjectBuild(BaseModel):
         return value
 
 
+class ProjectTestIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["command", "container-target", "waived"] = "command"
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_waiver(self) -> "ProjectTestIntent":
+        if self.mode == "waived" and not (self.reason and self.reason.strip()):
+            raise ValueError("waived test intent requires a reason")
+        if self.reason is not None and ("\n" in self.reason or len(self.reason) > 256):
+            raise ValueError("test intent reason must be a short single line")
+        return self
+
+
 class ProjectCI(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -70,6 +109,7 @@ class ProjectCI(BaseModel):
     apiUrl: str
     storage: Literal["isolated", "shared"] = "isolated"
     deployTokenSecret: str = "ARCTURUS_DEPLOY_TOKEN"
+    testIntent: ProjectTestIntent = Field(default_factory=ProjectTestIntent)
 
     @field_validator("apiUrl")
     @classmethod
@@ -92,12 +132,16 @@ class ProjectRegistry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     host: str
+    transportHost: str | None = None
+    transportTlsVerify: bool = True
     userSecret: str = "REGISTRY_USER"
     tokenSecret: str = "REGISTRY_TOKEN"
 
-    @field_validator("host")
+    @field_validator("host", "transportHost")
     @classmethod
-    def validate_host(cls, value: str) -> str:
+    def validate_host(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
         if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*(?::[0-9]+)?", value):
             raise ValueError("registry host is invalid")
         return value
@@ -443,6 +487,13 @@ def command_status(args: argparse.Namespace) -> None:
     print(json.dumps(api_request(args, "GET", f"/v1/services/{args.service}/active"), indent=2, sort_keys=True))
 
 
+def command_health(args: argparse.Namespace) -> None:
+    result = api_request(args, "GET", "/v2/health")
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if result.get("status") != "healthy":
+        raise SystemExit(1)
+
+
 def command_verify(args: argparse.Namespace) -> None:
     result = api_request(args, "GET", f"/v1/services/{args.service}/active")
     if args.revision and result.get("commit_sha") != args.revision.lower():
@@ -458,6 +509,10 @@ def command_verify(args: argparse.Namespace) -> None:
     routing = result.get("routing", {})
     if args.require_routing and routing.get("status") != "published":
         raise SystemExit(f"routing is not published: {json.dumps(routing, sort_keys=True)}")
+    if args.require_routing and not routing.get("configDigest"):
+        raise SystemExit("published routing receipt is missing its configuration digest")
+    if args.require_routing and routing.get("verification", {}).get("status") != "passed":
+        raise SystemExit("published routing receipt has not passed upstream verification")
     if args.require_routing and args.revision and routing.get("revision") != args.revision.lower():
         raise SystemExit("router receipt revision does not match the active release")
     if routing.get("deploymentId") and routing.get("deploymentId") != result.get("deployment_id"):
@@ -546,6 +601,7 @@ def command_rollback_probe(args: argparse.Namespace) -> None:
 
 def command_host_status(args: argparse.Namespace) -> None:
     units: dict[str, str] = {}
+    unit_details: dict[str, dict[str, str]] = {}
     for unit in args.critical_unit:
         result = subprocess.run(
             ["systemctl", "--user", "is-active", unit],
@@ -554,11 +610,45 @@ def command_host_status(args: argparse.Namespace) -> None:
             check=False,
         )
         units[unit] = result.stdout.strip() or "inactive"
+        details = subprocess.run(
+            ["systemctl", "--user", "show", unit, "-p", "FragmentPath", "-p", "ExecStart"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        unit_details[unit] = dict(
+            line.split("=", 1) for line in details.stdout.splitlines() if "=" in line
+        )
     failed = sorted(unit for unit, status in units.items() if status != "active")
+    for unit, details in unit_details.items():
+        exec_start = details.get("ExecStart", "")
+        fragment = details.get("FragmentPath", "")
+        if args.reject_nvm_unit_drift and "/.nvm/" in exec_start:
+            failed.append(f"{unit}:nvm-path-drift")
+        if args.reject_source_unit_drift and re.search(
+            r"/(?:src|arcturus)/(?:modules|deploy)/", exec_start
+        ):
+            failed.append(f"{unit}:source-path-drift")
+        if args.require_installed_artifacts and (
+            "/.local/share/arcturus-deployer/current/" not in exec_start
+            or "/.config/systemd/user/" not in fragment
+        ):
+            failed.append(f"{unit}:not-installed-release")
     backup: dict[str, Any] = {"configured": bool(args.backup_unit)}
     if args.backup_unit:
         result = subprocess.run(
-            ["systemctl", "--user", "show", args.backup_unit, "-p", "Result", "-p", "ExecMainExitTimestampMonotonic"],
+            [
+                "systemctl",
+                "--user",
+                "show",
+                args.backup_unit,
+                "-p",
+                "Result",
+                "-p",
+                "ExecMainExitTimestamp",
+                "-p",
+                "ExecMainExitTimestampMonotonic",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -574,11 +664,123 @@ def command_host_status(args: argparse.Namespace) -> None:
         except ValueError:
             completed = 0
         age_seconds = max(0.0, time.monotonic() - completed / 1_000_000) if completed else None
+        backup["completed_at"] = backup["properties"].get("ExecMainExitTimestamp") or None
+        if age_seconds is None:
+            fallback = latest_backup_success(Path(args.backup_success_log).expanduser())
+            if fallback:
+                completed_epoch, completed_at = fallback
+                age_seconds = max(0.0, time.time() - completed_epoch)
+                backup["completed_at"] = completed_at
+                backup["timestamp_source"] = "success-log"
         backup["age_seconds"] = age_seconds
         if age_seconds is None or age_seconds > args.backup_max_age_hours * 3600:
             if args.backup_unit not in failed:
                 failed.append(args.backup_unit)
-    payload = {"status": "ready" if not failed else "failed", "units": units, "backup": backup, "failed": failed}
+    ports: dict[str, str] = {}
+    for target in args.critical_port:
+        host, separator, raw_port = target.rpartition(":")
+        if not separator or not host or not raw_port.isdigit():
+            ports[target] = "invalid"
+            failed.append(f"port:{target}")
+            continue
+        try:
+            with socket.create_connection((host, int(raw_port)), timeout=3):
+                ports[target] = "open"
+        except OSError:
+            ports[target] = "closed"
+            failed.append(f"port:{target}")
+    probes: dict[str, str] = {}
+    for url in args.http_probe:
+        try:
+            with urllib.request.urlopen(url, timeout=10) as response:
+                probes[url] = str(response.status)
+                if not 200 <= response.status < 400:
+                    failed.append(f"http:{url}")
+        except urllib.error.HTTPError as exc:
+            probes[url] = str(exc.code)
+            if not 200 <= exc.code < 400:
+                failed.append(f"http:{url}")
+        except (urllib.error.URLError, OSError, http.client.HTTPException):
+            probes[url] = "unreachable"
+            failed.append(f"http:{url}")
+    containers: dict[str, Any] = {"ghosts": [], "volumeConflicts": {}, "aliasConflicts": {}}
+    listed = subprocess.run(
+        ["podman", "ps", "-q"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    volume_owners: dict[str, list[str]] = {}
+    alias_owners: dict[str, list[str]] = {}
+    for container_id in listed.stdout.split():
+        inspected = subprocess.run(
+            ["podman", "inspect", container_id],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if inspected.returncode != 0:
+            continue
+        info = json.loads(inspected.stdout)[0]
+        name = info.get("Name", container_id)
+        state = info.get("State", {})
+        pid = int(state.get("Pid") or 0)
+        if state.get("Running") and (pid <= 0 or not Path(f"/proc/{pid}").exists()):
+            containers["ghosts"].append(name)
+            failed.append(f"ghost:{name}")
+        for mount in info.get("Mounts", []):
+            if mount.get("Type") == "volume" and mount.get("RW"):
+                volume_owners.setdefault(mount.get("Name", ""), []).append(name)
+        for network, settings in info.get("NetworkSettings", {}).get("Networks", {}).items():
+            for alias in settings.get("Aliases") or []:
+                alias_owners.setdefault(f"{network}:{alias}", []).append(name)
+    for volume in args.protected_volume:
+        owners = sorted(set(volume_owners.get(volume, [])))
+        if len(owners) > 1:
+            containers["volumeConflicts"][volume] = owners
+            failed.append(f"volume-conflict:{volume}")
+    for alias in args.protected_alias:
+        matches = {
+            key: sorted(set(owners))
+            for key, owners in alias_owners.items()
+            if key.endswith(f":{alias}") and len(set(owners)) > 1
+        }
+        if matches:
+            containers["aliasConflicts"].update(matches)
+            failed.append(f"alias-conflict:{alias}")
+    routing: dict[str, Any] = {"configured": args.require_matching_routing_receipt}
+    if args.require_matching_routing_receipt:
+        status_file = Path(args.router_status_file).expanduser()
+        vhosts_dir = Path(args.vhosts_dir).expanduser()
+        try:
+            receipt = json.loads(status_file.read_text())
+            route_failures = []
+            for service, state in receipt.get("services", {}).items():
+                vhost = vhosts_dir / f"generated-{service}.conf"
+                if (
+                    state.get("status") != "published"
+                    or not state.get("configDigest")
+                    or state.get("verification", {}).get("status") != "passed"
+                    or not vhost.is_file()
+                ):
+                    route_failures.append(service)
+            routing = {"configured": True, "failed": sorted(route_failures)}
+            failed.extend(f"routing:{service}" for service in route_failures)
+        except (OSError, json.JSONDecodeError) as exc:
+            routing = {"configured": True, "error": str(exc)}
+            failed.append("routing:receipt")
+    failed = sorted(set(failed))
+    payload = {
+        "status": "ready" if not failed else "failed",
+        "units": units,
+        "unitDetails": unit_details,
+        "backup": backup,
+        "ports": ports,
+        "httpProbes": probes,
+        "containers": containers,
+        "routing": routing,
+        "failed": failed,
+    }
     print(json.dumps(payload, indent=2, sort_keys=True))
     if failed:
         raise SystemExit(1)
@@ -726,6 +928,10 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("service")
     add_api_options(status)
     status.set_defaults(func=command_status)
+    health = subparsers.add_parser("health")
+    health.add_argument("--json", action="store_true")
+    add_api_options(health)
+    health.set_defaults(func=command_health)
     verify = subparsers.add_parser("verify")
     verify.add_argument("service")
     verify.add_argument("--revision")
@@ -750,6 +956,35 @@ def build_parser() -> argparse.ArgumentParser:
     host_status.add_argument("--critical-unit", action="append", default=[])
     host_status.add_argument("--backup-unit")
     host_status.add_argument("--backup-max-age-hours", type=float, default=24)
+    host_status.add_argument(
+        "--backup-success-log",
+        default=os.getenv(
+            "ARCTURUS_BACKUP_LOG",
+            str(Path.home() / ".local/state/vps-rclone-backup/backup.log"),
+        ),
+    )
+    host_status.add_argument("--critical-port", action="append", default=[])
+    host_status.add_argument("--http-probe", action="append", default=[])
+    host_status.add_argument("--protected-volume", action="append", default=[])
+    host_status.add_argument("--protected-alias", action="append", default=[])
+    host_status.add_argument("--require-installed-artifacts", action="store_true")
+    host_status.add_argument("--reject-source-unit-drift", action="store_true")
+    host_status.add_argument("--reject-nvm-unit-drift", action="store_true")
+    host_status.add_argument("--require-matching-routing-receipt", action="store_true")
+    host_status.add_argument(
+        "--router-status-file",
+        default=os.getenv(
+            "ARCTURUS_ROUTER_STATUS_FILE",
+            f"/run/user/{os.getuid()}/arcturus/router-status.json",
+        ),
+    )
+    host_status.add_argument(
+        "--vhosts-dir",
+        default=os.getenv(
+            "ARCTURUS_VHOSTS_DIR",
+            str(Path.home() / "stacks/portal/config/vhosts.d"),
+        ),
+    )
     host_status.set_defaults(func=command_host_status)
     operation = subparsers.add_parser("operation")
     operation.add_argument("operation_id")

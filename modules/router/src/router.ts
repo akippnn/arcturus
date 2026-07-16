@@ -39,8 +39,29 @@ export interface RouterConfig {
   apexService?: string;
   registrySocket: string;
   statusFile?: string;
-  containerCli?: "podman" | "docker";
-  commandRunner?: (command: string, args: string[]) => void;
+  containerCli?: "podman" | "podman-remote" | "docker";
+  commandRunner?: (command: string, args: string[]) => string | void;
+  pidExists?: (pid: number) => boolean;
+  pathExists?: (path: string) => boolean;
+}
+
+interface VerificationCheck {
+  name: string;
+  status: "passed" | "failed";
+  message?: string;
+}
+
+interface RouteVerification {
+  domain: string;
+  upstream: string;
+  status: "passed" | "failed";
+  checks: VerificationCheck[];
+}
+
+interface ServiceVerification {
+  status: "passed" | "failed";
+  routes: RouteVerification[];
+  restoration?: VerificationCheck[];
 }
 
 export class Router {
@@ -147,8 +168,9 @@ export class Router {
 
       for (const domain of targetDomains) {
         if (domain === this.config.baseDomain && name !== this.config.apexService) {
-          console.warn(`[Router] Security violation: stack '${name}' attempted to bind to ${this.config.baseDomain}. Denying.`);
-          continue;
+          throw new Error(
+            `apex route denied for ${name}: ARCTURUS_APEX_SERVICE must authorize this service`,
+          );
         }
         lines.push(`server {`);
         lines.push(`    listen 443 ssl;`);
@@ -203,17 +225,19 @@ export class Router {
     }
 
     const desired = new Map<string, string>();
-    for (const stack of stacks) {
-      const config = this.generateVhost(stack);
-      if (!config.trim()) continue;
-      const filename = `generated-${stack.metadata.name}.conf`;
-      if (desired.has(filename)) {
-        throw new Error(`Duplicate stack name from registry: ${stack.metadata.name}`);
-      }
-      desired.set(filename, config);
-    }
+    const verification = this.initialVerification(stacks);
 
     try {
+      for (const stack of stacks) {
+        const config = this.generateVhost(stack);
+        if (!config.trim()) continue;
+        const filename = `generated-${stack.metadata.name}.conf`;
+        if (desired.has(filename)) {
+          throw new Error(`Duplicate stack name from registry: ${stack.metadata.name}`);
+        }
+        desired.set(filename, config);
+      }
+      this.verifyRuntimeTargets(verification);
       for (const [file, config] of desired) {
         this.writeAtomically(join(this.config.vhostsDir, file), config);
       }
@@ -222,21 +246,34 @@ export class Router {
           rmSync(join(this.config.vhostsDir, file));
         }
       }
-      this.testNginx();
-      this.reloadNginx();
-      this.writeRoutingStatus(stacks);
+      this.verifyGeneratedVhosts(verification);
+      this.runVerifiedNginxStep(verification, "nginx-test", () => this.testNginx());
+      this.runVerifiedNginxStep(verification, "nginx-reload", () => this.reloadNginx());
+      this.writeRoutingStatus(stacks, undefined, verification);
     } catch (error) {
+      this.markUnverifiedRoutesFailed(verification, error as Error);
       this.restoreConfigs(previous);
       let failure = error as Error;
+      const restoration: VerificationCheck[] = [];
       try {
         this.testNginx();
+        restoration.push({ name: "nginx-test", status: "passed" });
         this.reloadNginx();
+        restoration.push({ name: "nginx-reload", status: "passed" });
       } catch (restoreError) {
+        restoration.push({
+          name: "nginx-restoration",
+          status: "failed",
+          message: this.redactError((restoreError as Error).message),
+        });
         failure = new Error(
           `nginx apply failed (${failure.message}); configuration restoration failed (${(restoreError as Error).message})`,
         );
       }
-      this.writeRoutingStatus(stacks, failure);
+      for (const service of Object.values(verification)) {
+        service.restoration = restoration;
+      }
+      this.writeRoutingStatus(stacks, failure, verification);
       throw failure;
     }
   }
@@ -288,23 +325,32 @@ export class Router {
     renameSync(temporary, path);
   }
 
-  private writeRoutingStatus(stacks: Stack[], failure?: Error): void {
+  private writeRoutingStatus(
+    stacks: Stack[],
+    failure?: Error,
+    verification: Record<string, ServiceVerification> = {},
+  ): void {
     if (!this.config.statusFile) return;
     const services: Record<string, unknown> = {};
     for (const stack of stacks) {
-      const routes = Object.entries(stack.spec.services).flatMap(([serviceName, service]) =>
-        (service.domains || []).map(domain => ({
-          domain,
-          upstream: `${service.containerName || `${stack.metadata.name}-${serviceName}`}:${service.port}`,
-        })),
-      );
+      const routes = this.routesForStack(stack);
       if (routes.length === 0) continue;
       const filename = `generated-${stack.metadata.name}.conf`;
-      const config = existsSync(join(this.config.vhostsDir, filename))
+      const configPath = join(this.config.vhostsDir, filename);
+      const config = this.configExists(configPath)
         ? readFileSync(join(this.config.vhostsDir, filename), "utf-8")
         : "";
+      const serviceVerification = verification[stack.metadata.name] || {
+        status: "failed",
+        routes: routes.map(route => ({
+          ...route,
+          status: "failed" as const,
+          checks: [{ name: "verification", status: "failed" as const, message: "not run" }],
+        })),
+      };
+      const published = !failure && serviceVerification.status === "passed" && Boolean(config);
       services[stack.metadata.name] = {
-        status: failure ? "failed" : "published",
+        status: published ? "published" : "failed",
         revision: stack.metadata.annotations?.["arcturus.u128.org/revision"] || "legacy",
         deploymentId: stack.metadata.annotations?.["arcturus.u128.org/deployment-id"] || null,
         domains: routes.map(route => route.domain),
@@ -313,10 +359,202 @@ export class Router {
           ? `sha256:${createHash("sha256").update(config).digest("hex")}`
           : null,
         appliedAt: new Date().toISOString(),
-        ...(failure ? { error: { code: "nginx_apply_failed", message: this.redactError(failure.message) } } : {}),
+        verification: serviceVerification,
+        ...(!published ? {
+          error: {
+            code: failure ? "route_publication_failed" : "route_verification_failed",
+            message: this.redactError(failure?.message || "route verification failed"),
+          },
+        } : {}),
       };
     }
     this.writeAtomically(this.config.statusFile, JSON.stringify({ version: 1, services }, null, 2) + "\n");
+  }
+
+  private routesForStack(stack: Stack): Array<{ domain: string; upstream: string }> {
+    return Object.entries(stack.spec.services).flatMap(([serviceName, service]) => {
+      const upstream = `${service.containerName || `${stack.metadata.name}-${serviceName}`}:${service.port}`;
+      return [
+        ...(service.domains || []).map(domain => ({ domain, upstream })),
+        ...(service.aliases || []).map(alias => ({
+          domain: `${alias}.${this.config.baseDomain}`,
+          upstream,
+        })),
+      ];
+    });
+  }
+
+  private initialVerification(stacks: Stack[]): Record<string, ServiceVerification> {
+    return Object.fromEntries(
+      stacks
+        .map(stack => [
+          stack.metadata.name,
+          {
+            status: "passed" as const,
+            routes: this.routesForStack(stack).map(route => ({
+              ...route,
+              status: "passed" as const,
+              checks: [],
+            })),
+          },
+        ])
+        .filter(([, value]) => (value as ServiceVerification).routes.length > 0),
+    );
+  }
+
+  private verifyRuntimeTargets(verification: Record<string, ServiceVerification>): void {
+    const cached = new Map<string, { status: "passed" | "failed"; checks: VerificationCheck[] }>();
+    for (const service of Object.values(verification)) {
+      for (const route of service.routes) {
+        const [host, rawPort] = route.upstream.split(":");
+        const port = Number(rawPort);
+        const cacheKey = `${host}:${port}`;
+        const previous = cached.get(cacheKey);
+        if (previous) {
+          route.status = previous.status;
+          route.checks.push(...previous.checks.map(check => ({ ...check })));
+          if (previous.status === "failed") {
+            service.status = "failed";
+          }
+          continue;
+        }
+        try {
+          this.runContainerCommand(["exec", this.config.nginxContainer, "getent", "hosts", host]);
+          route.checks.push({ name: "portal-dns", status: "passed" });
+          const state = this.resolveContainerState(host);
+          if (!state.Running || state.Status !== "running") {
+            throw new Error(`container ${host} is not running`);
+          }
+          route.checks.push({ name: "container", status: "passed" });
+          if (!Number.isInteger(state.Pid) || state.Pid <= 0 || !this.pidExists(state.Pid)) {
+            throw new Error(`container ${host} has no live host PID`);
+          }
+          route.checks.push({ name: "pid", status: "passed" });
+          this.runContainerCommand([
+            "exec",
+            this.config.nginxContainer,
+            "nc",
+            "-z",
+            "-w",
+            "3",
+            host,
+            String(port),
+          ]);
+          route.checks.push({ name: "upstream-port", status: "passed" });
+          cached.set(cacheKey, {
+            status: "passed",
+            checks: route.checks.map(check => ({ ...check })),
+          });
+        } catch (error) {
+          route.status = "failed";
+          service.status = "failed";
+          route.checks.push({
+            name: "runtime",
+            status: "failed",
+            message: this.redactError((error as Error).message),
+          });
+          cached.set(cacheKey, {
+            status: "failed",
+            checks: route.checks.map(check => ({ ...check })),
+          });
+        }
+      }
+    }
+    const failed = Object.values(verification)
+      .flatMap(service => service.routes)
+      .filter(route => route.status === "failed");
+    if (failed.length > 0) {
+      throw new Error(`route runtime verification failed: ${failed.map(route => route.upstream).join(", ")}`);
+    }
+  }
+
+  private resolveContainerState(host: string): { Running: boolean; Status: string; Pid: number } {
+    try {
+      return JSON.parse(
+        this.runContainerCommand(["inspect", "--format", "{{json .State}}", host]),
+      );
+    } catch {
+      const ids = this.runContainerCommand(["ps", "-q"]).split(/\s+/).filter(Boolean);
+      for (const id of ids) {
+        const inspected = JSON.parse(
+          this.runContainerCommand(["inspect", "--format", "{{json .}}", id]),
+        );
+        const aliases = Object.values(inspected.NetworkSettings?.Networks || {})
+          .flatMap((network: any) => network.Aliases || []);
+        if (aliases.includes(host)) {
+          return inspected.State;
+        }
+      }
+      throw new Error(`no live container owns upstream name ${host}`);
+    }
+  }
+
+  private verifyGeneratedVhosts(verification: Record<string, ServiceVerification>): void {
+    for (const [name, service] of Object.entries(verification)) {
+      const path = join(this.config.vhostsDir, `generated-${name}.conf`);
+      const exists = this.configExists(path);
+      for (const route of service.routes) {
+        route.checks.push({
+          name: "vhost",
+          status: exists ? "passed" : "failed",
+          ...(!exists ? { message: `generated vhost is missing for ${name}` } : {}),
+        });
+        if (!exists) {
+          route.status = "failed";
+          service.status = "failed";
+        }
+      }
+    }
+    if (Object.values(verification).some(service => service.status === "failed")) {
+      throw new Error("generated vhost verification failed");
+    }
+  }
+
+  private runVerifiedNginxStep(
+    verification: Record<string, ServiceVerification>,
+    name: string,
+    action: () => void,
+  ): void {
+    try {
+      action();
+      for (const service of Object.values(verification)) {
+        for (const route of service.routes) {
+          route.checks.push({ name, status: "passed" });
+        }
+      }
+    } catch (error) {
+      for (const service of Object.values(verification)) {
+        service.status = "failed";
+        for (const route of service.routes) {
+          route.status = "failed";
+          route.checks.push({
+            name,
+            status: "failed",
+            message: this.redactError((error as Error).message),
+          });
+        }
+      }
+      throw error;
+    }
+  }
+
+  private markUnverifiedRoutesFailed(
+    verification: Record<string, ServiceVerification>,
+    error: Error,
+  ): void {
+    for (const service of Object.values(verification)) {
+      for (const route of service.routes) {
+        if (route.checks.length === 0) {
+          route.status = "failed";
+          service.status = "failed";
+          route.checks.push({
+            name: "configuration",
+            status: "failed",
+            message: this.redactError(error.message),
+          });
+        }
+      }
+    }
   }
 
   private testNginx(): void {
@@ -327,13 +565,20 @@ export class Router {
     this.runContainerCommand(["exec", this.config.nginxContainer, "nginx", "-s", "reload"]);
   }
 
-  private runContainerCommand(args: string[]): void {
+  private runContainerCommand(args: string[]): string {
     const command = this.config.containerCli || "podman";
     if (this.config.commandRunner) {
-      this.config.commandRunner(command, args);
-      return;
+      return this.config.commandRunner(command, args) || "";
     }
-    execFileSync(command, args, { encoding: "utf-8", timeout: 10000 });
+    return execFileSync(command, args, { encoding: "utf-8", timeout: 10000 });
+  }
+
+  private pidExists(pid: number): boolean {
+    return this.config.pidExists ? this.config.pidExists(pid) : existsSync(`/proc/${pid}`);
+  }
+
+  private configExists(path: string): boolean {
+    return this.config.pathExists ? this.config.pathExists(path) : existsSync(path);
   }
 
   private redactError(message: string): string {

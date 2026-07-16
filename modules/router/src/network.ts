@@ -19,7 +19,7 @@ export class NetworkManager {
   private portalContainer: string;
 
   constructor(engine = "podman", portalContainer = "portal-nginx") {
-    if (engine !== "docker" && engine !== "podman") {
+    if (engine !== "docker" && engine !== "podman" && engine !== "podman-remote") {
       throw new Error(`Unsupported container engine: ${engine}`);
     }
     this.engine = engine;

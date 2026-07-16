@@ -19,6 +19,17 @@ from release import DeploymentFailure, DeploymentRequest
 
 
 class ValidationTests(unittest.TestCase):
+    def test_v2_health_is_authenticated_and_returns_aggregate_state(self):
+        deployer = unittest.mock.Mock()
+        deployer.health.return_value = {"status": "healthy", "services": {}}
+        with (
+            patch.object(deploy_app, "verify_auth") as verify,
+            patch.object(deploy_app, "get_release_deployer", return_value=deployer),
+        ):
+            result = deploy_app.get_aggregate_health("Bearer test")
+        verify.assert_called_once_with("Bearer test")
+        self.assertEqual(result["status"], "healthy")
+
     def test_hashed_and_legacy_token_files_coexist_during_migration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

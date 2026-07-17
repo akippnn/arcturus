@@ -33,6 +33,14 @@ class ValidationTests(unittest.TestCase):
                 records = deploy_app._token_records()
             self.assertEqual([record.get("id") or record.get("name") for record in records], ["hashed", "legacy"])
 
+    def test_legacy_webhook_secret_remains_accepted_during_migration(self):
+        with (
+            patch.object(deploy_app, "WEBHOOK_SECRET", "legacy-shared-secret"),
+            patch.object(deploy_app, "TOKEN_FILE", Path("/nonexistent/tokens.json")),
+            patch.object(deploy_app, "LEGACY_TOKEN_FILE", Path("/nonexistent/legacy.json")),
+        ):
+            deploy_app.authorize_service("Bearer legacy-shared-secret", "legacy-service")
+
     def test_hashed_scoped_token_authentication(self):
         token = "test-token-that-is-not-logged"
         salt = b"0123456789abcdef"
@@ -60,7 +68,7 @@ class ValidationTests(unittest.TestCase):
         payload = deploy_app.healthz()
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["service"], "arcturus-deployer")
-        self.assertEqual(payload["version"], "1.0.0-rc.1")
+        self.assertEqual(payload["version"], "1.0.0-rc.2")
         self.assertIn("authenticated-preflight", payload["features"])
         self.assertIn("legacy-compose-handoff", payload["features"])
 
@@ -104,6 +112,101 @@ class ValidationTests(unittest.TestCase):
     def test_deploy_request_rejects_domains_outside_managed_zone(self):
         with self.assertRaises(ValidationError):
             deploy_app.DeployRequest(stack="example", domain="example.net")
+
+
+
+    def test_legacy_default_branch_supports_gitea_master(self):
+        symbolic_missing = unittest.mock.Mock(returncode=1, stdout="")
+        set_head = unittest.mock.Mock(returncode=0, stdout="")
+        symbolic_master = unittest.mock.Mock(returncode=0, stdout="origin/master\n")
+        with patch.object(
+            deploy_app.subprocess,
+            "run",
+            side_effect=[symbolic_missing, set_head, symbolic_master],
+        ) as run:
+            resolved = deploy_app.resolve_origin_default_ref(Path("/tmp/example"), ["git"])
+        self.assertEqual(resolved, "origin/master")
+        self.assertEqual(run.call_args_list[1].args[0], ["git", "remote", "set-head", "origin", "--auto"])
+
+    def test_legacy_default_branch_falls_back_to_main(self):
+        missing = unittest.mock.Mock(returncode=1, stdout="")
+        main = unittest.mock.Mock(returncode=0, stdout="a" * 40 + "\n")
+        with patch.object(
+            deploy_app.subprocess,
+            "run",
+            side_effect=[missing, missing, missing, main],
+        ):
+            resolved = deploy_app.resolve_origin_default_ref(Path("/tmp/example"), ["git"])
+        self.assertEqual(resolved, "origin/main")
+
+    def test_legacy_apply_requires_immutable_revision_and_service_scope(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "example").mkdir()
+            response = Response()
+            with (
+                patch.object(deploy_app, "STACKS_BASE", root),
+                patch.object(deploy_app, "LEGACY_STATE_DIR", root / "state"),
+                patch.object(deploy_app, "LEGACY_ALLOW_MUTABLE_MAIN", False),
+                patch.object(deploy_app, "authorize_service") as authorize,
+            ):
+                with self.assertRaises(deploy_app.HTTPException) as error:
+                    deploy_app.deploy(
+                        deploy_app.DeployRequest(stack="example", action="apply"),
+                        response,
+                        "Bearer scoped",
+                    )
+            self.assertEqual(error.exception.status_code, 400)
+            authorize.assert_called_once_with("Bearer scoped", "example")
+            self.assertEqual(response.headers["Deprecation"], "true")
+            self.assertNotIn("sunset", {key.lower() for key in response.headers})
+
+    def test_legacy_immutable_apply_rejects_non_git_stack(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "example").mkdir()
+            with (
+                patch.object(deploy_app, "STACKS_BASE", root),
+                patch.object(deploy_app, "LEGACY_STATE_DIR", root / "state"),
+                patch.object(deploy_app, "authorize_service"),
+                patch.object(deploy_app, "is_v2_managed", return_value=False),
+            ):
+                with self.assertRaises(deploy_app.HTTPException) as error:
+                    deploy_app.deploy(
+                        deploy_app.DeployRequest(
+                            stack="example",
+                            action="apply",
+                            deploy_trigger="a" * 40,
+                        ),
+                        Response(),
+                        "Bearer scoped",
+                    )
+            self.assertEqual(error.exception.status_code, 409)
+
+    def test_legacy_destroy_writes_a_mode_0600_receipt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "example").mkdir()
+            state = root / "state"
+            with (
+                patch.object(deploy_app, "STACKS_BASE", root),
+                patch.object(deploy_app, "LEGACY_STATE_DIR", state),
+                patch.object(deploy_app, "authorize_service"),
+                patch.object(deploy_app, "is_v2_managed", return_value=False),
+                patch.object(deploy_app, "read_stack_domain", return_value=""),
+                patch.object(deploy_app, "run_terraform", return_value={"status": "ok"}),
+                patch.object(deploy_app, "discord_notify"),
+            ):
+                result = deploy_app.deploy(
+                    deploy_app.DeployRequest(stack="example", action="destroy"),
+                    Response(),
+                    "Bearer scoped",
+                )
+            receipt = state / "receipts" / "example.json"
+            self.assertTrue(receipt.exists())
+            self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(receipt.read_text())["service"], "example")
+            self.assertEqual(result["compatibility"], "manifest-v1")
 
     def test_dns_request_rejects_domains_outside_managed_zone(self):
         with self.assertRaises(ValidationError):

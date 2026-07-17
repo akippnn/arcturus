@@ -158,7 +158,11 @@ except (OSError, ValueError):
 PY
 )"
   fi
-  if [[ ! -e "$TARGET_SELF" || "$current" == "$desired" || ( -n "$managed" && "$current" == "$managed" ) ]]; then
+  if [[ -e "$TARGET_SELF" && "$current" == "$desired" ]]; then
+    # Do not replace the updater with an identical copy while it is executing.
+    # Bundle/source upgrades still replace it when the candidate digest changes.
+    :
+  elif [[ ! -e "$TARGET_SELF" || ( -n "$managed" && "$current" == "$managed" ) ]]; then
     install -m 0755 "$source" "$TARGET_SELF.new"
     mv -f "$TARGET_SELF.new" "$TARGET_SELF"
   else

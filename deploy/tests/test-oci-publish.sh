@@ -32,33 +32,23 @@ while (($#)); do
   esac
 done
 if [[ "$url" == */v1/artifact-uploads ]]; then
-  python3 - "${data#@}" "$output" <<'PY'
-import json, os, sys
-request = json.load(open(sys.argv[1], encoding='utf-8'))
-assert request['service'] == 'crownfi'
-assert request['revision'] == 'a' * 40
-assert request['components'] == ['web', 'api']
-value = {
-  'uploadId': os.environ.get('TEST_UPLOAD_ID', '123e4567-e89b-42d3-a456-426614174000'),
-  'registry': os.environ.get('TEST_GRANT_REGISTRY', 'registry.example.ts.net'),
-  'repositories': {'web': 'crownfi/web', 'api': 'crownfi/api'},
-  'expiresAt': '2026-07-17T00:00:00Z',
-  'credential': {'username': 'upload-user', 'secret': 'upload-secret'},
-}
-json.dump(value, open(sys.argv[2], 'w', encoding='utf-8'))
-PY
+  request="$(tr -d '\n' <"${data#@}")"
+  expected_request='{"service": "crownfi", "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "components": ["web", "api"]}'
+  [[ "$request" == "$expected_request" ]]
+  upload_id="${TEST_UPLOAD_ID:-123e4567-e89b-42d3-a456-426614174000}"
+  registry="${TEST_GRANT_REGISTRY:-registry.example.ts.net}"
+  cat >"$output" <<JSON
+{"uploadId":"$upload_id","registry":"$registry","repositories":{"web":"crownfi/web","api":"crownfi/api"},"expiresAt":"2026-07-17T00:00:00Z","credential":{"username":"upload-user","secret":"upload-secret"}}
+JSON
   printf 201
 elif [[ "$url" == */v1/artifact-uploads/123e4567-e89b-42d3-a456-426614174000/complete ]]; then
   [[ "$max_time" == "${TEST_EXPECT_COMPLETION_TIMEOUT:-600}" ]]
-  python3 - "${data#@}" "$output" <<'PY'
-import json, os, sys
-request = json.load(open(sys.argv[1], encoding='utf-8'))
-assert request == {'components': {
-  'api': {'digest': os.environ['TEST_DIGEST_API']},
-  'web': {'digest': os.environ['TEST_DIGEST_WEB']},
-}}
-json.dump({'uploadId': os.environ.get('TEST_UPLOAD_ID', '123e4567-e89b-42d3-a456-426614174000'), 'status': 'accepted', 'receipts': []}, open(sys.argv[2], 'w', encoding='utf-8'))
-PY
+  request="$(tr -d '\n' <"${data#@}")"
+  expected_request="{\"components\": {\"api\": {\"digest\": \"$TEST_DIGEST_API\"}, \"web\": {\"digest\": \"$TEST_DIGEST_WEB\"}}}"
+  [[ "$request" == "$expected_request" ]]
+  cat >"$output" <<JSON
+{"uploadId":"${TEST_UPLOAD_ID:-123e4567-e89b-42d3-a456-426614174000}","status":"accepted","receipts":[{"component":"web","manifestDigest":"$TEST_DIGEST_WEB"},{"component":"api","manifestDigest":"$TEST_DIGEST_API"}]}
+JSON
   printf 201
 else
   echo "unexpected curl URL: $url" >&2
@@ -72,6 +62,7 @@ set -euo pipefail
 [[ -z "${ARCTURUS_CONTROL_TOKEN:-}" ]]
 printf '%q ' "$@" >>"$TEST_BUILDAH_LOG"
 printf '\n' >>"$TEST_BUILDAH_LOG"
+while [[ "${1:-}" == --root || "${1:-}" == --runroot ]]; do shift 2; done
 case "$1" in
   login)
     IFS= read -r secret || true
@@ -105,16 +96,26 @@ esac
 STUB
 chmod +x "$stubs/curl" "$stubs/buildah"
 
+digest_dir="$workspace/digests"
+receipt_file="$workspace/receipt.json"
 output="$(env PATH="$stubs:$PATH" \
   ARCTURUS_URL=https://registry.example.ts.net \
   ARCTURUS_CONTROL_TOKEN=control-token \
+  ARCTURUS_BUILDAH_ROOT="$workspace/storage" \
+  ARCTURUS_BUILDAH_RUNROOT="$workspace/runroot" \
+  ARCTURUS_OCI_DIGEST_DIR="$digest_dir" \
+  ARCTURUS_OCI_RECEIPT_FILE="$receipt_file" \
   TEST_BUILDAH_LOG="$log" TEST_REVISION="$revision" \
   TEST_DIGEST_WEB="$digest_web" TEST_DIGEST_API="$digest_api" \
   "$root/deploy/arcturus-oci-publish.sh" crownfi "$revision" web=local-web api=local-api)"
 
-grep -Fq '"status": "accepted"' <<<"$output"
+grep -Fq '"status":"accepted"' <<<"$output"
 grep -Fq 'login --authfile' "$log"
 grep -Fq 'push --authfile' "$log"
+grep -Fq -- '--root' "$log"
+test "$(cat "$digest_dir/web.digest")" = "$digest_web"
+test "$(cat "$digest_dir/api.digest")" = "$digest_api"
+grep -Fq '"status":"accepted"' "$receipt_file"
 grep -Fq 'docker://registry.example.ts.net/crownfi/web:upload-123e4567-e89b-42d3-a456-426614174000' "$log"
 grep -Fq 'docker://registry.example.ts.net/crownfi/api:upload-123e4567-e89b-42d3-a456-426614174000' "$log"
 

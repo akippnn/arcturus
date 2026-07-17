@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "arcturus-auth"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "arcturus-contracts",
  "base64",
@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "arcturus-contracts"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "arcturusd"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "arcturus-auth",
  "arcturus-contracts",

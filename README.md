@@ -2,7 +2,7 @@
 
 Arcturus is a manifest-driven application platform for deploying immutable OCI releases to a single AlmaLinux host with rootless Podman, Quadlet, and user systemd.
 
-> **Status:** `v1.0.0-rc.1` source candidate for the stable `v1.0.0` release; operational acceptance is still pending. The tested Python/FastAPI service still owns manifest-v2 activation, rollback, and recovery. Rust owns short-lived OCI upload authorization, server-side artifact verification, and immutable receipts. Authenticated writable ingress is private to a dedicated Tailscale Service and fails closed to read-only mode. CrownFi/blueprint migration, release-aware retention/GC, and the real-host acceptance matrix remain release gates.
+> **Status:** `v1.0.0-rc.2` source candidate for the stable `v1.0.0` release; operational acceptance is still pending. The tested Python/FastAPI service still owns manifest-v2 activation, rollback, and recovery. Rust owns short-lived OCI upload authorization, server-side artifact verification, and immutable receipts. Authenticated writable ingress is private to a dedicated Tailscale Service and fails closed to read-only mode. CrownFi/blueprint migration, release-aware retention/GC, and the real-host acceptance matrix remain release gates.
 
 Arcturus deliberately targets the space between hand-maintained Compose deployments and a full container orchestrator. CI builds images and resolves their digests; Arcturus validates a release manifest, renders generated Quadlets, activates the release, verifies readiness, publishes routing state, and restores the previous healthy release when activation fails.
 
@@ -34,7 +34,7 @@ Arcturus does **not** build images on the production host, deploy floating tags,
 ## Architecture
 
 ```text
-GitHub repository + GitHub Actions
+Git repository + Gitea Actions, GitHub Actions, or generic CI
         |
         | preferred: short-lived grant + direct OCI upload over Tailscale
         | compatibility: external digest-pinned registry
@@ -55,7 +55,7 @@ See [Architecture](docs/architecture.md) for component and trust-boundary detail
 
 ### 1. Prepare a supported host (current compatibility updater)
 
-The current installer validates Python 3.12+, Node.js 22+, Podman 5.8+, systemd 257+, and the Podman Quadlet generator.
+The current installer validates Python 3.12+, Node.js 22+, Podman 5.8+, systemd 252+, and the Podman Quadlet generator. The supported host baselines are AlmaLinux 10.2 and AlmaLinux 9.8; feature probes, not distribution-name checks, remain authoritative.
 
 ```bash
 sudo -iu appsvc ./deploy/install-host.sh \
@@ -129,6 +129,18 @@ arcturusctl remove --api-url http://127.0.0.1:9090 --service my-api
 
 Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are not accepted as command-line values. Use `journalctl --user` for runtime logs.
 
+## Backward compatibility
+
+Manifest v2 remains the authoritative deployment, activation, rollback, and recovery API. Manifest v1 remains supported in three bounded forms:
+
+1. **Native v1 routing:** existing strict `arcturus.u128.org/v1` files are normalized deterministically by the trusted registry, assigned a registry-owned canonical SHA-256 manifest digest and content-derived 40-character revision at runtime, and accepted only when the router recomputes and verifies both values. Authored provenance annotations cannot impersonate a v2 release.
+2. **V2-backed v1 export:** the service blueprint can derive a strict v1 `Stack` from a concrete digest-pinned v2 release for older routing consumers. Current Arcturus activation routes directly from accepted v2 state; an exported v1 file ingested as a native file is still treated as v1 and cannot self-assert v2 provenance.
+3. **Legacy `/deploy` bridge:** retained for pre-v2 Terraform-era installations. By default, apply operations require an authenticated service scope and full immutable Git SHA, use a per-stack lock, verify ancestry and exact checkout, and write an atomic receipt. Existing shared webhook secrets remain accepted during migration. `--allow-legacy-mutable-main` is an explicit temporary escape hatch for old CI that cannot yet send a SHA; it is weaker than v2 and should be removed with `--disallow-legacy-mutable-main` after the workflow is updated.
+
+Router enforcement is the default on clean installs and upgrades. Native v1 files remain routable because provenance is attached by the trusted registry at runtime; operators do not need to weaken the router to audit mode merely to preserve existing routes. `--legacy-v1-mode audit` exists only as a temporary diagnostic escape hatch for non-registry integrations.
+
+CI is provider-neutral. Gitea and GitHub workflows call the same scripts; provider-specific context names are only workflow inputs. Correctness depends on Arcturus's per-service host lock, not on whether a CI implementation honors workflow concurrency.
+
 ## Repository layout
 
 | Path | Purpose |
@@ -162,13 +174,13 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 
 Product versions and manifest API versions are independent:
 
-- Current product candidate: `v1.0.0-rc.1`
+- Current product candidate: `v1.0.0-rc.2`
 - Stable release target: `v1.0.0`
 - Operational acceptance: pending the gates below
 - Current manifest API: `arcturus.u128.org/v2`
 - Legacy routing/stack API: `arcturus.u128.org/v1`
 
-The currently compatible Service Blueprint requires the host capabilities `authenticated-preflight` and `legacy-compose-handoff`. The generated lockfile and the CLI preflight make that dependency explicit and reject an older host before application image builds begin. See [`COMPATIBILITY.json`](COMPATIBILITY.json).
+The compatible Service Blueprint supports Gitea, GitHub, and generic CI; external or Arcturus-owned registries; and a strict manifest-v1 compatibility export derived from manifest v2. Its baseline requires `authenticated-preflight`, `legacy-compose-handoff`, `manifest-v1-safe-routing-mirror`, and `manifest-v1-provenance-routing`; owned registry mode declares additional receipt capabilities. The generated lockfile and the CLI preflight make that dependency explicit and reject an older host before application image builds begin. See [`COMPATIBILITY.json`](COMPATIBILITY.json).
 
 Product v1.0 preserves and stabilizes the existing manifest API v2. See the [roadmap](docs/ROADMAP.md).
 

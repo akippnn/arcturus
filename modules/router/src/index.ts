@@ -32,6 +32,10 @@ function configuredDomain(name: string, fallback?: string): string {
 function loadConfig() {
   const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`;
   const baseDomain = configuredDomain("BASE_DOMAIN");
+  const legacyV1Mode = process.env.ARCTURUS_LEGACY_V1_MODE || "enforce";
+  if (legacyV1Mode !== "enforce" && legacyV1Mode !== "audit") {
+    throw new ConfigurationError("ARCTURUS_LEGACY_V1_MODE must be enforce or audit");
+  }
 
   return {
     vhostsDir: requiredEnvironment("VHOSTS_DIR"),
@@ -43,6 +47,8 @@ function loadConfig() {
     busSocket: process.env.BUS_SOCKET || `${runtimeDir}/arcturus/bus.sock`,
     statusFile: process.env.ROUTER_STATUS_FILE || `${runtimeDir}/arcturus/router-status.json`,
     containerCli: (process.env.CONTAINER_CLI || "podman") as "podman" | "docker",
+    legacyV1Mode: legacyV1Mode as "enforce" | "audit",
+    allowLegacyNginxExtras: process.env.ARCTURUS_ALLOW_LEGACY_NGINX_EXTRAS === "1",
   };
 }
 

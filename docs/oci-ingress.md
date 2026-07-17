@@ -1,8 +1,8 @@
 # Arcturus OCI ingress
 
-Arcturus can receive application images directly from GitHub Actions over Tailscale without placing Gitea or another application registry in the deployment chain.
+Arcturus can receive application images from Gitea Actions, GitHub Actions, or a generic Tailscale-connected runner without placing an external application registry in the deployment chain.
 
-Use a currently supported CNCF Distribution v3 image pinned by digest. At the `v1.0.0-rc.1` source freeze, v3.1.1 is the current stable release and includes the upstream fix for CVE-2026-41888. Do not treat the minimum token-auth feature version as a security-support floor: select a currently supported release and review upstream advisories before installation. The installer validates digest pinning, but the operator remains responsible for the pinned release.
+Use a currently supported CNCF Distribution v3 image pinned by digest. At the `v1.0.0-rc.2` source freeze, v3.1.1 is the current stable release and includes the upstream fix for CVE-2026-41888. Do not treat the minimum token-auth feature version as a security-support floor: select a currently supported release and review upstream advisories before installation. The installer validates digest pinning, but the operator remains responsible for the pinned release.
 
 The production boundary deliberately separates responsibilities:
 
@@ -76,7 +76,7 @@ Build each local image with the revision label that will be submitted to Arcturu
 org.opencontainers.image.revision=<40-character Git commit SHA>
 ```
 
-Then run the installed helper from a Tailscale-connected GitHub Actions job:
+Then run the installed helper from any Tailscale-connected CI job:
 
 ```bash
 export ARCTURUS_URL='https://registry.example-tailnet.ts.net'
@@ -99,7 +99,7 @@ request grant
 → receive immutable accepted receipts
 ```
 
-The short-lived registry credential is generated for the upload and is not stored as a GitHub secret. Completion makes the push credential unusable.
+The short-lived registry credential is generated for the upload and is not stored as a Gitea or GitHub secret. Completion makes the push credential unusable.
 
 ## Receipt enforcement and compatibility
 
@@ -130,7 +130,7 @@ curl --silent --output /dev/null --write-out '%{http_code}\n' \
 
 ## Deliberately unfinished release gates
 
-The `v1.0.0-rc.1` source candidate implements authenticated ingress, verification, receipts, and deployment enforcement. It does not yet claim operational stable-release acceptance. The remaining gates are:
+The `v1.0.0-rc.2` source candidate implements authenticated ingress, verification, receipts, and deployment enforcement. It does not yet claim operational stable-release acceptance. The remaining gates are:
 
 - migrate the Service Blueprint and CrownFi workflow to the publisher helper;
 - run real GitHub Actions upload, interruption/retry, expiry, cross-service, oversize, digest-mismatch, restart/re-pull, and registry-unavailable rollback tests;

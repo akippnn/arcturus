@@ -6,7 +6,7 @@ Arcturus is a practical single-host application platform. It is not intended to 
 
 Product versions and manifest APIs are independent:
 
-- Current product candidate: `v1.0.0-rc.1`
+- Current product candidate: `v1.0.0-rc.2`
 - Stable release target: `v1.0.0`
 - Operational status: acceptance pending; not yet declared stable
 - Current release API: `arcturus.u128.org/v2`
@@ -26,7 +26,7 @@ The main release path already supports:
 - active-manifest publication and router receipts
 - project generation and CI integration through the service blueprint
 
-The `v1.0.0-rc.1` source candidate contains the tested manifest-v2 lifecycle plus Arcturus-owned OCI upload grants, private Tailscale ingress, independent artifact verification, immutable receipts, and owned-registry deployment enforcement. External private registries and Python/FastAPI remain explicit compatibility paths while the Service Blueprint/CrownFi migration and real-host acceptance matrix are completed.
+The `v1.0.0-rc.2` source candidate contains the tested manifest-v2 lifecycle plus Arcturus-owned OCI upload grants, private Tailscale ingress, independent artifact verification, immutable receipts, and owned-registry deployment enforcement. External private registries and Python/FastAPI remain explicit compatibility paths while the Service Blueprint/CrownFi migration and real-host acceptance matrix are completed.
 
 The control-plane language migration remains incremental. Rust owns artifact ingress; Python continues to own activation, rollback, and recovery until parity is proven.
 
@@ -122,7 +122,7 @@ Arcturus will not adopt Kubernetes solely to claim multi-host support.
 
 ## Delivery order
 
-1. Freeze and validate the `v1.0.0-rc.1` source candidate.
+1. Freeze and validate the `v1.0.0-rc.2` source candidate.
 2. Migrate the Service Blueprint and CrownFi CI, then complete clean-host/live-upgrade/failure-matrix acceptance.
 3. Add release-aware retention and reviewed garbage collection.
 4. Publish the operationally accepted v1.0 release artifacts.

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,9 +15,15 @@ const router = new Router({
   registrySocket: "/tmp/registry.sock",
 });
 
-function stack(name: string, domain: string) {
+function stack(name: string, domain: string): any {
   return {
-    metadata: { name },
+    metadata: {
+      name,
+      annotations: {
+        "arcturus.u128.org/revision": "1".repeat(40),
+        "arcturus.u128.org/compatibility-source": "v2",
+      },
+    },
     spec: {
       services: {
         web: {
@@ -27,6 +34,63 @@ function stack(name: string, domain: string) {
     },
   };
 }
+
+
+
+test("enforcement rejects routing stacks without registry provenance", () => {
+  const unsafe = stack("legacy-app", "legacy.example.org");
+  unsafe.metadata = { name: "legacy-app" };
+  assert.throws(
+    () => router.generateVhost(unsafe),
+    /lacks verified v1 manifest provenance or v2 release provenance/,
+  );
+});
+
+function registryStampedV1(name: string, domain: string): any {
+  const native = stack(name, domain);
+  native.metadata = { name };
+  const digestHex = createHash("sha256").update(JSON.stringify(native)).digest("hex");
+  native.metadata.annotations = {
+    "arcturus.u128.org/compatibility-source": "v1",
+    "arcturus.u128.org/manifest-digest": `sha256:${digestHex}`,
+    "arcturus.u128.org/revision": digestHex.slice(0, 40),
+  };
+  return native;
+}
+
+test("enforcement accepts registry-stamped native manifest-v1 routing", () => {
+  const native = registryStampedV1("legacy-app", "legacy.example.org");
+  assert.match(router.generateVhost(native), /legacy\.example\.org/);
+});
+
+test("enforcement rejects tampered native manifest-v1 routing", () => {
+  const native = registryStampedV1("legacy-app", "legacy.example.org");
+  native.spec.services.web.domains = ["tampered.example.org"];
+  assert.throws(
+    () => router.generateVhost(native),
+    /lacks verified v1 manifest provenance or v2 release provenance/,
+  );
+});
+
+test("audit mode temporarily accepts standalone manifest-v1 stacks", () => {
+  const auditRouter = new Router({
+    vhostsDir: ".",
+    nginxContainer: "portal-nginx",
+    baseDomain: "example.org",
+    certDomain: "example.org",
+    registrySocket: "/tmp/registry.sock",
+    legacyV1Mode: "audit",
+  });
+  const unsafe = stack("legacy-app", "legacy.example.org");
+  unsafe.metadata = { name: "legacy-app" };
+  assert.match(auditRouter.generateVhost(unsafe), /legacy\.example\.org/);
+});
+
+test("legacy nginxExtras are disabled unless explicitly enabled", () => {
+  const value = stack("example-app", "app.example.org");
+  value.spec.services.web.nginxExtras = "proxy_hide_header X-Test;";
+  assert.throws(() => router.generateVhost(value), /nginxExtras is disabled/);
+});
 
 test("generates a vhost for a valid subdomain", () => {
   const config = router.generateVhost(stack("example-app", "app.example.org"));
@@ -146,9 +210,10 @@ test("publishes a revision-matched routing receipt after nginx reload", async ()
       ...release.metadata,
       annotations: {
         "arcturus.u128.org/revision": "1".repeat(40),
+        "arcturus.u128.org/compatibility-source": "v2",
         "arcturus.u128.org/deployment-id": "11111111-1111-4111-8111-111111111111",
       },
-    } as typeof release.metadata;
+    };
     await receiptRouter.apply([release]);
     const receipt = JSON.parse(readFileSync(statusFile, "utf-8"));
     assert.equal(receipt.services["example-app"].status, "published");

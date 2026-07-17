@@ -20,9 +20,9 @@ This audit reconciles the post-RC2 changes with the accepted Arcturus-owned OCI 
 
 ## Removed or changed
 
-- Gitea workflow definitions were removed. GitHub is the source repository, CI provider, and release authority.
-- Gitea runner registration examples were removed.
-- GitHub is now the default project CI provider; legacy `gitea` values remain parseable only for migration compatibility.
+- Arcturus core CI remains GitHub-hosted, but application deployment adapters are provider-neutral. Gitea Actions, GitHub Actions, and generic runners are supported by the same service-blueprint scripts.
+- Provider workflows use native context names (`gitea.*` or `github.*`) and do not rely on CI concurrency for correctness.
+- External-registry deployments remain supported while projects optionally migrate to Arcturus-owned OCI receipts.
 - Documentation now distinguishes the current external-registry/Python lifecycle compatibility path from the target Arcturus-owned OCI/Rust path.
 
 ## v1.0.0 source disposition
@@ -38,10 +38,10 @@ The critical ingress path is complete in source:
 
 ## Still intentionally incomplete
 
-The `v1.0.0-rc.1` source candidate is not yet operationally accepted. Remaining gates are:
+The `v1.0.0-rc.2` source candidate is not yet operationally accepted. Remaining gates are:
 
 1. migrate the Service Blueprint and CrownFi CI to the generic Arcturus publisher;
-2. execute the real GitHub Actions, clean-host, live-upgrade, interruption/retry, expiry, cross-service, oversize, digest-mismatch, registry-restart, and registry-unavailable rollback matrix;
+2. execute the real Gitea and GitHub Actions, clean-host, live-upgrade, interruption/retry, expiry, cross-service, oversize, digest-mismatch, registry-restart, and registry-unavailable rollback matrix;
 3. implement release-aware retention pins and reviewed garbage collection before manifest deletion is enabled;
 4. publish signature-verifiable GitHub Release host bundles and replace the compatibility updater;
 5. migrate deployment read/preflight and later activation/rollback/recovery APIs from Python to Rust only after parity and rollback acceptance;

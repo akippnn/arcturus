@@ -25,38 +25,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo +1.97.0 generate-lockfile --manifest-path rust/Cargo.toml
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('.github/workflows/ci.yml')
-          text = path.read_text(encoding='utf-8')
-          text = text.replace(
-              "      - name: Generate dependency lock\n        run: cargo +1.97.0 generate-lockfile\n",
-              "",
-          )
-          text = text.replace(
-              "cargo +1.97.0 clippy --workspace",
-              "cargo +1.97.0 clippy --locked --workspace",
-          )
-          text = text.replace(
-              "cargo +1.97.0 test --workspace",
-              "cargo +1.97.0 test --locked --workspace",
-          )
-          text = text.replace(
-              "      - name: Emit generated lockfile for initial bootstrap\n"
-              "        if: always()\n"
-              "        run: |\n"
-              "          echo '---BEGIN ARCTURUS CARGO LOCK---'\n"
-              "          cat Cargo.lock\n"
-              "          echo '---END ARCTURUS CARGO LOCK---'\n",
-              "",
-          )
-          path.write_text(text, encoding='utf-8')
-          PY
-          rm .github/workflows/rust-lock-bootstrap.yml
+          git add rust/Cargo.lock
+          if git diff --cached --quiet; then
+            echo 'Cargo.lock is already current.'
+            exit 0
+          fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add rust/Cargo.lock .github/workflows/ci.yml .github/workflows/rust-lock-bootstrap.yml
           git diff --cached --check
           git commit -m 'build: lock Rust workspace dependencies'
           git push origin "HEAD:${GITHUB_HEAD_REF}"

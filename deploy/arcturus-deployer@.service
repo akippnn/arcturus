@@ -7,6 +7,7 @@ Wants=network-online.target arcturus-podman-api.service arcturus-registry.servic
 Type=simple
 WorkingDirectory=%h/.local/share/arcturus-deployer/current
 EnvironmentFile=%h/.config/arcturus/deployer.env
+EnvironmentFile=-%h/.config/arcturus/registry.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=%h/.local/share/arcturus-deployer/current/venv/bin/python -m uvicorn image_policy_app:app --host %I --port 9090 --workers 1 --no-access-log
 Restart=on-failure

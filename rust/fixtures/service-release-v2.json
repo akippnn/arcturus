@@ -1,0 +1,19 @@
+{
+  "apiVersion": "arcturus.u128.org/v2",
+  "kind": "ServiceRelease",
+  "metadata": {
+    "name": "stellar-project",
+    "revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "spec": {
+    "components": {
+      "web": {
+        "image": "registry.example.org/stellar-project/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "deployment": {
+      "timeoutSeconds": 300,
+      "rollbackOnFailure": true
+    }
+  }
+}

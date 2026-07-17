@@ -41,6 +41,24 @@ updates:
         update-types:
           - major
 
+  - package-ecosystem: cargo
+    directory: /rust
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      routine-rust-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      major-rust-updates:
+        patterns:
+          - "*"
+        update-types:
+          - major
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

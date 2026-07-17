@@ -12,9 +12,10 @@ Arcturus welcomes focused changes that preserve the single-host, manifest-driven
 ## Development checks
 
 ```bash
-python3 -m pytest deploy/tests
+PYTHONPATH=deploy python3 -m unittest discover -s deploy/tests -v
 for module in modules/bus modules/registry modules/router; do npm --prefix "$module" ci; npm --prefix "$module" run build; done
 npm --prefix modules/router test
+(cd rust && cargo fmt --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-targets)
 bash -n deploy/*.sh deploy/arcturusctl
 ```
 

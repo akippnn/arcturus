@@ -138,10 +138,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Test replayable host updates
-        run: ./deploy/tests/test-host-update.sh
+      - name: Test host installation and updates
+        run: |
+          ./deploy/tests/test-host-update.sh
+          ./deploy/tests/test-oci-registry-quadlet.sh
+          ./deploy/tests/test-oci-registry-install-validation.sh
       - name: Shell syntax
-        run: bash -n deploy/install-host.sh deploy/arcturus-host-update deploy/arcturusctl deploy/build-bundle.sh deploy/tests/test-host-update.sh
+        run: |
+          bash -n deploy/install-host.sh deploy/arcturus-host-update deploy/arcturusctl \
+            deploy/build-bundle.sh deploy/render-oci-registry-quadlet.sh \
+            deploy/tests/test-host-update.sh deploy/tests/test-oci-registry-quadlet.sh \
+            deploy/tests/test-oci-registry-install-validation.sh
       - name: Validate package metadata and lockfiles
         shell: bash
         run: |

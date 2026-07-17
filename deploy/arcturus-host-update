@@ -75,8 +75,9 @@ value_options = {
     '--host-user', '--host-home', '--listen-address', '--runner-cidr',
     '--allowed-bind-root', '--network', '--vhosts-dir', '--nginx-container',
     '--base-domain', '--cert-domain', '--container-cli',
+    '--oci-registry-image', '--oci-registry-port', '--oci-registry-storage',
 }
-flag_options = {'--configure-firewall'}
+flag_options = {'--configure-firewall', '--disable-oci-registry'}
 transient_value = {'--bundle', '--source-dir', '--version'}
 transient_flags = {'--validate-only', '--dry-run', '--force-config'}
 out = []

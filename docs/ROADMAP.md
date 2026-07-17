@@ -25,7 +25,9 @@ The main release path already supports:
 - active-manifest publication and router receipts
 - project generation and CI integration through the service blueprint
 
-The code is feature-complete for a v0.99 preview. v1.0 is primarily a stabilization and real-host acceptance milestone.
+The existing deployment engine is feature-complete for a v0.99 preview. Before the stable release, artifact transport is being consolidated into an Arcturus-owned OCI ingress and the control-plane API is beginning a gradual Rust migration. External private registries and Python/FastAPI remain supported as explicit compatibility paths during that transition.
+
+The transition is delivered in independently reversible slices: Rust contracts and health, loopback OCI storage, scoped upload authorization, artifact receipts, deployment enforcement, remote Tailscale ingress, and finally lifecycle migration from Python.
 
 # v0.99 — Public release candidate
 
@@ -56,6 +58,9 @@ Freeze the current release contract and prove the platform on clean supported Al
 - stable compatibility/deprecation policy for the legacy API
 - cleanup of test/runtime warnings
 - complete clean-host acceptance documentation
+- Arcturus-owned OCI upload grants, artifact receipts, and retention pins
+- a TLS-protected Tailscale OCI endpoint with no permanent application registry token
+- Rust ownership of the stable control-plane API while retaining tested compatibility rollback
 
 Quadlet `.build` is excluded: production images are built in CI. Quadlet `.pod` remains optional until a real namespace-sharing requirement appears.
 

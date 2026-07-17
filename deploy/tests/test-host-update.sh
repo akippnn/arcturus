@@ -22,9 +22,12 @@ done
 
 bundle1='registry.example.org/platform/arcturus@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 bundle2='registry.example.org/platform/arcturus@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+oci_image='registry.example.org/distribution/distribution@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 
 "$root/deploy/arcturus-host-update" bootstrap --installer "$workspace/deploy1/install-host.sh" \
-  --bundle "$bundle1" --host-user appsvc --network internal_routing --allowed-bind-root /srv/apps
+  --bundle "$bundle1" --host-user appsvc --network internal_routing --allowed-bind-root /srv/apps \
+  --oci-registry-image "$oci_image" --oci-registry-port 9443 \
+  --oci-registry-storage /srv/arcturus-registry
 [[ -x "$HOME/.local/bin/arcturus-host-update" ]]
 grep -q "$bundle1" "$ARCTURUS_CONFIG_DIR/host-install.json"
 python3 - "$ARCTURUS_CONFIG_DIR/host-install.json" <<'PY'
@@ -32,7 +35,11 @@ import json, sys
 state = json.load(open(sys.argv[1]))
 assert state['installArgs'] == [
     '--host-user', 'appsvc', '--network', 'internal_routing',
-    '--allowed-bind-root', '/srv/apps'
+    '--allowed-bind-root', '/srv/apps',
+    '--oci-registry-image',
+    'registry.example.org/distribution/distribution@sha256:' + 'c' * 64,
+    '--oci-registry-port', '9443',
+    '--oci-registry-storage', '/srv/arcturus-registry',
 ]
 PY
 
@@ -45,6 +52,9 @@ import sys
 args = Path(sys.argv[1]).read_bytes().split(b'\0')
 assert b'--host-user' in args and b'appsvc' in args
 assert b'--bundle' in args
+assert b'--oci-registry-image' in args
+assert b'--oci-registry-port' in args and b'9443' in args
+assert b'--oci-registry-storage' in args and b'/srv/arcturus-registry' in args
 PY
 [[ "$(wc -l < "$ARCTURUS_STATE_DIR/host-install-history.jsonl")" -eq 2 ]]
 "$HOME/.local/bin/arcturus-host-update" show | grep -q '<new-image@sha256:digest>'

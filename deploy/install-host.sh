@@ -19,6 +19,10 @@ Usage: install-host.sh [options]
   --base-domain DOMAIN       Router-managed base domain
   --cert-domain DOMAIN       TLS certificate domain (default: base domain)
   --container-cli podman     Container CLI used by the router
+  --oci-registry-image IMAGE  Digest-pinned Distribution image; enables loopback OCI storage
+  --oci-registry-port PORT    Loopback OCI port (default: 9443)
+  --oci-registry-storage DIR  Persistent OCI storage (default: ~/.local/share/arcturus-registry)
+  --disable-oci-registry      Disable and remove the local OCI data-plane unit
   --configure-firewall        Add a source-scoped firewalld rule for port 9090
   --validate-only             Validate inputs and prerequisites without writing
   --dry-run                   Print the resolved installation without writing
@@ -39,6 +43,11 @@ NGINX_CONTAINER="portal-nginx"
 BASE_DOMAIN=""
 CERT_DOMAIN=""
 CONTAINER_CLI="podman"
+OCI_REGISTRY_IMAGE=""
+OCI_REGISTRY_PORT="9443"
+OCI_REGISTRY_PORT_SET=false
+OCI_REGISTRY_STORAGE=""
+DISABLE_OCI_REGISTRY=false
 CONFIGURE_FIREWALL=false
 VALIDATE_ONLY=false
 DRY_RUN=false
@@ -61,6 +70,10 @@ while (($#)); do
     --base-domain) BASE_DOMAIN="$2"; shift 2 ;;
     --cert-domain) CERT_DOMAIN="$2"; shift 2 ;;
     --container-cli) CONTAINER_CLI="$2"; shift 2 ;;
+    --oci-registry-image) OCI_REGISTRY_IMAGE="$2"; shift 2 ;;
+    --oci-registry-port) OCI_REGISTRY_PORT="$2"; OCI_REGISTRY_PORT_SET=true; shift 2 ;;
+    --oci-registry-storage) OCI_REGISTRY_STORAGE="$2"; shift 2 ;;
+    --disable-oci-registry) DISABLE_OCI_REGISTRY=true; shift ;;
     --configure-firewall) CONFIGURE_FIREWALL=true; shift ;;
     --validate-only) VALIDATE_ONLY=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -75,7 +88,7 @@ PYTHON_BIN="${ARCTURUS_PYTHON:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   command -v python3.12 >/dev/null 2>&1 && PYTHON_BIN=python3.12 || PYTHON_BIN=python3
 fi
-for command in bash "$PYTHON_BIN" node podman systemctl systemd-analyze sha256sum getent; do
+for command in bash "$PYTHON_BIN" node podman systemctl systemd-analyze sha256sum getent curl; do
   command -v "$command" >/dev/null 2>&1 || errors+=("missing prerequisite: $command")
 done
 if command -v "$PYTHON_BIN" >/dev/null 2>&1 && ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
@@ -94,7 +107,8 @@ fi
 if command -v systemd >/dev/null 2>&1 && [[ "$(systemd --version | awk 'NR==1 {print $2}')" -lt 257 ]]; then
   errors+=("systemd 257 or newer is required")
 fi
-[[ -x /usr/lib/systemd/system-generators/podman-system-generator ]] || errors+=("Podman Quadlet generator is missing")
+QUADLET_GENERATOR="${ARCTURUS_QUADLET_GENERATOR:-/usr/lib/systemd/system-generators/podman-system-generator}"
+[[ -x "$QUADLET_GENERATOR" ]] || errors+=("Podman Quadlet generator is missing: $QUADLET_GENERATOR")
 [[ "$HOST_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || errors+=("invalid --host-user: $HOST_USER")
 [[ -z "$HOST_HOME_OVERRIDE" || "$HOST_HOME_OVERRIDE" == /* ]] || errors+=("--host-home must be absolute")
 [[ "$NETWORK" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || errors+=("invalid --network: $NETWORK")
@@ -130,7 +144,7 @@ fi
 if [[ -n "$SOURCE_DIR" ]]; then
   for file in app.py image_policy_app.py release.py arcturusctl.py arcturus-deployer@.service \
     arcturus-podman-api.service arcturus-bus.service arcturus-registry.service \
-    arcturus-router.service; do
+    arcturus-router.service render-oci-registry-quadlet.sh; do
     [[ -f "$SOURCE_DIR/$file" ]] || errors+=("source artifact is missing: $SOURCE_DIR/$file")
   done
   source_root_check="$(cd "$SOURCE_DIR/.." 2>/dev/null && pwd || true)"
@@ -162,6 +176,7 @@ fi
 # sourcing them as shell code.
 existing_deployer_config="$HOST_HOME/.config/arcturus/deployer.env"
 existing_platform_config="$HOST_HOME/.config/arcturus/platform.env"
+existing_oci_config="$HOST_HOME/.config/arcturus/oci-registry.env"
 read_existing_value() {
   local file="$1" key="$2"
   [[ -f "$file" ]] || return 0
@@ -182,6 +197,14 @@ if [[ "$NGINX_CONTAINER" == portal-nginx ]]; then
   existing_nginx="$(read_existing_value "$existing_platform_config" NGINX_CONTAINER)"
   [[ -z "$existing_nginx" ]] || NGINX_CONTAINER="$existing_nginx"
 fi
+if ! $DISABLE_OCI_REGISTRY; then
+  [[ -n "$OCI_REGISTRY_IMAGE" ]] || OCI_REGISTRY_IMAGE="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_REGISTRY_IMAGE)"
+  if ! $OCI_REGISTRY_PORT_SET; then
+    existing_oci_port="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_REGISTRY_PORT)"
+    [[ -z "$existing_oci_port" ]] || OCI_REGISTRY_PORT="$existing_oci_port"
+  fi
+  [[ -n "$OCI_REGISTRY_STORAGE" ]] || OCI_REGISTRY_STORAGE="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_REGISTRY_STORAGE)"
+fi
 
 if [[ -z "$VHOSTS_DIR" ]]; then
   for candidate in \
@@ -198,6 +221,33 @@ if [[ -z "$VHOSTS_DIR" || ! -d "$VHOSTS_DIR" ]]; then
   exit 2
 fi
 CERT_DOMAIN="${CERT_DOMAIN:-$BASE_DOMAIN}"
+if [[ -n "$OCI_REGISTRY_IMAGE" && -z "$OCI_REGISTRY_STORAGE" ]]; then
+  OCI_REGISTRY_STORAGE="$HOST_HOME/.local/share/arcturus-registry"
+fi
+
+oci_errors=()
+if [[ -n "$OCI_REGISTRY_IMAGE" && ! "$OCI_REGISTRY_IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$ ]]; then
+  oci_errors+=("--oci-registry-image must be pinned as repository@sha256:digest")
+fi
+if [[ ! "$OCI_REGISTRY_PORT" =~ ^[0-9]+$ ]] || ((OCI_REGISTRY_PORT < 1024 || OCI_REGISTRY_PORT > 65535)); then
+  oci_errors+=("--oci-registry-port must be between 1024 and 65535")
+elif [[ "$OCI_REGISTRY_PORT" == 9090 ]]; then
+  oci_errors+=("--oci-registry-port must not conflict with the deployer API port 9090")
+fi
+if [[ -n "$OCI_REGISTRY_STORAGE" && ! "$OCI_REGISTRY_STORAGE" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+  oci_errors+=("--oci-registry-storage must be an absolute path without whitespace")
+fi
+if $DISABLE_OCI_REGISTRY && { [[ -n "$OCI_REGISTRY_IMAGE" ]] || $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]]; }; then
+  oci_errors+=("--disable-oci-registry cannot be combined with OCI registry configuration options")
+fi
+if [[ -z "$OCI_REGISTRY_IMAGE" ]] && ! $DISABLE_OCI_REGISTRY && { $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]]; }; then
+  oci_errors+=("OCI registry port or storage requires --oci-registry-image or an existing OCI configuration")
+fi
+if ((${#oci_errors[@]})); then
+  printf 'Arcturus OCI registry validation failed\n' >&2
+  printf '  - %s\n' "${oci_errors[@]}" >&2
+  exit 2
+fi
 
 STATE_DIR="$HOST_HOME/.local/share/arcturus-deployer"
 CONFIG_DIR="$HOST_HOME/.config/arcturus"
@@ -207,6 +257,9 @@ BIN_DIR="$HOST_HOME/.local/bin"
 RUNTIME_DIR="/run/user/$HOST_UID/arcturus"
 CONFIG_FILE="$CONFIG_DIR/deployer.env"
 PLATFORM_CONFIG_FILE="$CONFIG_DIR/platform.env"
+OCI_CONFIG_FILE="$CONFIG_DIR/oci-registry.env"
+OCI_RUNTIME_ENV_FILE="$CONFIG_DIR/oci-registry-runtime.env"
+OCI_QUADLET_FILE="$QUADLET_DIR/arcturus-oci-registry.container"
 
 if [[ -z "$VERSION" && -n "$SOURCE_DIR" ]]; then
   VERSION="local-$(find "$SOURCE_DIR" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)"
@@ -225,12 +278,19 @@ Arcturus host configuration
   listeners:         127.0.0.1${LISTEN_ADDRESS:+, $LISTEN_ADDRESS}
   network:           $NETWORK
   router:            ${BASE_DOMAIN:-disabled}${BASE_DOMAIN:+ via $NGINX_CONTAINER}
+  OCI data plane:    ${OCI_REGISTRY_IMAGE:-disabled}${OCI_REGISTRY_IMAGE:+ on 127.0.0.1:$OCI_REGISTRY_PORT}
+  OCI storage:       ${OCI_REGISTRY_STORAGE:-not configured}
   state:             $STATE_DIR
   allowed bind roots: $(IFS=,; echo "${ALLOWED_BIND_ROOTS[*]}")
 EOF
 
 $VALIDATE_ONLY && exit 0
 $DRY_RUN && exit 0
+
+if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
+  # Resolve the immutable infrastructure image before changing the installed release.
+  podman image exists "$OCI_REGISTRY_IMAGE" || podman pull "$OCI_REGISTRY_IMAGE" >/dev/null
+fi
 
 umask 077
 mkdir -p "$STATE_DIR/releases" "$STATE_DIR/active-manifests" "$CONFIG_DIR" "$UNIT_DIR" "$QUADLET_DIR" "$BIN_DIR" "$RUNTIME_DIR"
@@ -247,10 +307,12 @@ trap cleanup EXIT
 if [[ -n "$SOURCE_DIR" ]]; then
   for file in app.py image_policy_app.py release.py arcturusctl.py requirements.txt \
     arcturus-deployer@.service arcturus-podman-api.service arcturus-bus.service \
-    arcturus-registry.service arcturus-router.service arcturusctl; do
+    arcturus-registry.service arcturus-router.service arcturusctl \
+    render-oci-registry-quadlet.sh; do
     install -m 0644 "$SOURCE_DIR/$file" "$staging/$file"
   done
-  chmod 0755 "$staging/arcturusctl" "$staging/arcturusctl.py"
+  chmod 0755 "$staging/arcturusctl" "$staging/arcturusctl.py" \
+    "$staging/render-oci-registry-quadlet.sh"
   if [[ -d "$SOURCE_DIR/wheelhouse" ]]; then
     cp -a "$SOURCE_DIR/wheelhouse" "$staging/wheelhouse"
   fi
@@ -306,6 +368,7 @@ PODMAN_SOCKET=$RUNTIME_DIR/podman.sock
 RUNNER_TOKENS_FILE=$CONFIG_DIR/tokens.json
 ARCTURUS_ROUTER_STATUS_FILE=$RUNTIME_DIR/router-status.json
 ARCTURUS_REGISTRY_SOCKET=$RUNTIME_DIR/registry.sock
+ARCTURUS_OCI_REGISTRY_URL=${OCI_REGISTRY_IMAGE:+http://127.0.0.1:$OCI_REGISTRY_PORT}
 EOF
 if [[ ! -f "$CONFIG_FILE" || $FORCE_CONFIG == true ]]; then
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -330,6 +393,7 @@ NGINX_CONTAINER=$NGINX_CONTAINER
 BASE_DOMAIN=$BASE_DOMAIN
 CERT_DOMAIN=$CERT_DOMAIN
 CONTAINER_CLI=$CONTAINER_CLI
+ARCTURUS_OCI_REGISTRY_URL=${OCI_REGISTRY_IMAGE:+http://127.0.0.1:$OCI_REGISTRY_PORT}
 EOF
 if [[ ! -f "$PLATFORM_CONFIG_FILE" || $FORCE_CONFIG == true ]]; then
   [[ ! -f "$PLATFORM_CONFIG_FILE" ]] || cp -a "$PLATFORM_CONFIG_FILE" "$PLATFORM_CONFIG_FILE.backup.$(date -u +%Y%m%dT%H%M%SZ)"
@@ -339,6 +403,46 @@ else
   echo "Preserving existing $PLATFORM_CONFIG_FILE; proposed configuration staged." >&2
 fi
 rm -f "$rendered_platform"
+
+if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
+  mkdir -p "$OCI_REGISTRY_STORAGE"
+  chmod 0700 "$OCI_REGISTRY_STORAGE"
+  rendered_oci="$(mktemp)"
+  cat >"$rendered_oci" <<EOF
+ARCTURUS_OCI_REGISTRY_IMAGE=$OCI_REGISTRY_IMAGE
+ARCTURUS_OCI_REGISTRY_PORT=$OCI_REGISTRY_PORT
+ARCTURUS_OCI_REGISTRY_STORAGE=$OCI_REGISTRY_STORAGE
+ARCTURUS_OCI_REGISTRY_URL=http://127.0.0.1:$OCI_REGISTRY_PORT
+EOF
+  install -m 0600 "$rendered_oci" "$OCI_CONFIG_FILE"
+  rm -f "$rendered_oci"
+  oci_http_secret="$(read_existing_value "$OCI_RUNTIME_ENV_FILE" REGISTRY_HTTP_SECRET)"
+  [[ -n "$oci_http_secret" ]] || oci_http_secret="$($PYTHON_BIN -c 'import secrets; print(secrets.token_urlsafe(48))')"
+  rendered_oci_runtime="$(mktemp)"
+  cat >"$rendered_oci_runtime" <<EOF
+REGISTRY_HTTP_ADDR=0.0.0.0:5000
+REGISTRY_HTTP_SECRET=$oci_http_secret
+REGISTRY_LOG_LEVEL=info
+REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY=/var/lib/registry
+REGISTRY_STORAGE_DELETE_ENABLED=false
+REGISTRY_STORAGE_MAINTENANCE_UPLOADPURGING_ENABLED=true
+REGISTRY_STORAGE_MAINTENANCE_UPLOADPURGING_AGE=168h
+REGISTRY_STORAGE_MAINTENANCE_UPLOADPURGING_INTERVAL=24h
+REGISTRY_STORAGE_MAINTENANCE_UPLOADPURGING_DRYRUN=false
+REGISTRY_STORAGE_MAINTENANCE_READONLY_ENABLED=true
+EOF
+  install -m 0600 "$rendered_oci_runtime" "$OCI_RUNTIME_ENV_FILE"
+  rm -f "$rendered_oci_runtime"
+  oci_quadlet_stage="$(mktemp -d)"
+  "$release_path/render-oci-registry-quadlet.sh" \
+    "$OCI_REGISTRY_IMAGE" "$OCI_REGISTRY_PORT" "$OCI_REGISTRY_STORAGE" \
+    "$OCI_RUNTIME_ENV_FILE" >"$oci_quadlet_stage/arcturus-oci-registry.container"
+  QUADLET_UNIT_DIRS="$oci_quadlet_stage" "$QUADLET_GENERATOR" --user --dryrun >/dev/null
+  install -m 0644 "$oci_quadlet_stage/arcturus-oci-registry.container" "$OCI_QUADLET_FILE"
+  rm -rf "$oci_quadlet_stage"
+else
+  rm -f "$OCI_CONFIG_FILE" "$OCI_RUNTIME_ENV_FILE"
+fi
 
 install -m 0644 "$release_path/arcturus-deployer@.service" "$UNIT_DIR/arcturus-deployer@.service"
 install -m 0644 "$release_path/arcturus-podman-api.service" "$UNIT_DIR/arcturus-podman-api.service"
@@ -388,6 +492,26 @@ systemctl --user enable arcturus-podman-api.service
 systemctl --user restart arcturus-podman-api.service
 systemctl --user enable arcturus-bus.service arcturus-registry.service
 systemctl --user restart arcturus-bus.service arcturus-registry.service
+if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
+  systemctl --user restart arcturus-oci-registry.service
+  registry_ready=false
+  for _ in {1..30}; do
+    if curl --fail --silent "http://127.0.0.1:$OCI_REGISTRY_PORT/v2/" >/dev/null 2>&1; then
+      registry_ready=true
+      break
+    fi
+    sleep 1
+  done
+  $registry_ready || {
+    systemctl --user status arcturus-oci-registry.service --no-pager -l >&2 || true
+    echo "Arcturus OCI registry did not become ready on loopback port $OCI_REGISTRY_PORT" >&2
+    exit 1
+  }
+else
+  systemctl --user stop arcturus-oci-registry.service >/dev/null 2>&1 || true
+  rm -f "$OCI_QUADLET_FILE"
+  systemctl --user daemon-reload
+fi
 if [[ -n "$BASE_DOMAIN" ]]; then
   systemctl --user enable arcturus-router.service
   systemctl --user restart arcturus-router.service
@@ -410,4 +534,7 @@ fi
 
 echo "Arcturus $VERSION installed for $HOST_USER."
 echo "API readiness: curl --fail http://127.0.0.1:9090/healthz"
+if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
+  echo "OCI readiness: curl --fail http://127.0.0.1:$OCI_REGISTRY_PORT/v2/"
+fi
 echo "Create a CI token with: arcturusctl token create --database '$CONFIG_DIR/tokens.json' --service <service> --token-id <service>-ci --output '$CONFIG_DIR/<service>-ci.token'"

@@ -1,9 +1,7 @@
 name: Fix Rust upload-auth opt-in boundary
 
 on:
-  push:
-    branches:
-      - feat/rust-oci-upload-authorization
+  pull_request:
     paths:
       - '.github/workflows/fix-rust-auth-opt-in.yml'
 
@@ -12,12 +10,13 @@ permissions:
 
 jobs:
   fix-and-validate:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: feat/rust-oci-upload-authorization
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
       - name: Restore health-only default
         shell: bash
@@ -158,4 +157,4 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git commit -m 'fix: keep Rust upload authorization opt-in'
-          git push origin HEAD:feat/rust-oci-upload-authorization
+          git push origin "HEAD:${GITHUB_HEAD_REF}"

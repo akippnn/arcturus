@@ -1,0 +1,28 @@
+name: Rust lock bootstrap
+
+on:
+  pull_request:
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-lock-bootstrap.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Generate dependency lock
+        working-directory: rust
+        run: cargo +1.97.0 generate-lockfile
+      - name: Upload dependency lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-cargo-lock
+          path: rust/Cargo.lock
+          if-no-files-found: error
+          retention-days: 1

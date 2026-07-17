@@ -27,7 +27,8 @@ oci_image='registry.example.org/distribution/distribution@sha256:ccccccccccccccc
 "$root/deploy/arcturus-host-update" bootstrap --installer "$workspace/deploy1/install-host.sh" \
   --bundle "$bundle1" --host-user appsvc --network internal_routing --allowed-bind-root /srv/apps \
   --oci-registry-image "$oci_image" --oci-registry-port 9443 \
-  --oci-registry-storage /srv/arcturus-registry --enable-oci-auth
+  --oci-registry-storage /srv/arcturus-registry --enable-oci-auth \
+  --oci-registry-host arcturus.tailnet.ts.net --oci-tailscale-service svc:arcturus-oci
 [[ -x "$HOME/.local/bin/arcturus-host-update" ]]
 grep -q "$bundle1" "$ARCTURUS_CONFIG_DIR/host-install.json"
 python3 - "$ARCTURUS_CONFIG_DIR/host-install.json" <<'PY'
@@ -41,6 +42,8 @@ assert state['installArgs'] == [
     '--oci-registry-port', '9443',
     '--oci-registry-storage', '/srv/arcturus-registry',
     '--enable-oci-auth',
+    '--oci-registry-host', 'arcturus.tailnet.ts.net',
+    '--oci-tailscale-service', 'svc:arcturus-oci',
 ]
 PY
 
@@ -57,6 +60,8 @@ assert b'--oci-registry-image' in args
 assert b'--oci-registry-port' in args and b'9443' in args
 assert b'--oci-registry-storage' in args and b'/srv/arcturus-registry' in args
 assert b'--enable-oci-auth' in args
+assert b'--oci-registry-host' in args and b'arcturus.tailnet.ts.net' in args
+assert b'--oci-tailscale-service' in args and b'svc:arcturus-oci' in args
 PY
 [[ "$(wc -l < "$ARCTURUS_STATE_DIR/host-install-history.jsonl")" -eq 2 ]]
 "$HOME/.local/bin/arcturus-host-update" show | grep -q '<new-image@sha256:digest>'

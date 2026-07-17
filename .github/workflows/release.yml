@@ -11,6 +11,7 @@ permissions:
 jobs:
   package:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -28,6 +29,10 @@ jobs:
       - name: Verify release commit is on main
         shell: bash
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Verify coordinated version metadata
+        run: python deploy/tests/check-version-consistency.py
+      - name: Build and test release bundle
+        run: docker build --target test --file deploy/Containerfile.bundle .
       - name: Create reproducible source archive and bundle
         shell: bash
         run: |

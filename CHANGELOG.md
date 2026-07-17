@@ -4,20 +4,36 @@ All notable public changes to Arcturus are documented here. The project follows 
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-07-17
+
+This release freezes the `v1.0.0-rc.1` source candidate for the stable `v1.0.0` release. It completes the receipt-enforced private OCI path in source while retaining the proven manifest-v2 Python lifecycle. Operational stable-release acceptance still requires a real supported host, a live GitHub Actions upload, and the documented failure-injection matrix.
+
 ### Added
 
-- Installer-managed Rust OCI authorization service with protected Ed25519 signing state, local JWKS verification, and bundle runtime smoke validation
-- Architecture-transition audit documenting retained compatibility and remaining Rust/OCI migration gates
+- Dedicated Tailscale HTTPS OCI ingress that proxies `/v2/` to loopback Distribution and API/token routes to loopback Rust
+- Short-lived service/component-scoped upload grants and Ed25519 Registry v2 token issuance
+- `POST /v1/artifact-uploads/{uploadId}/complete` with server-side manifest, descriptor, config, platform, revision, blob, and size verification
+- Immutable artifact and layer receipts persisted in SQLite, including idempotent completion and artifact audit events
+- Manifest-v2 deployment enforcement for Arcturus-owned images, bound to service, component, repository, revision, and digest
+- Generic Buildah publisher implementing grant, login, push, completion, and receipt output
+- Bounded concurrent artifact verification and a maximum layer-count policy
 
 ### Changed
 
-- GitHub is the default CI provider and sole documented hosted validation authority
-- Python/FastAPI and external private registries are explicitly classified as temporary compatibility paths
-- GitHub Actions setup dependencies are updated on top of the Rust security workflow
+- Distribution remains loopback-only and starts read-only; installation unlocks writes only after private HTTPS, Bearer challenge, authorization, and disk-headroom checks succeed
+- Host upgrades atomically merge installer-managed configuration while preserving operator-defined keys and backing up replaced files
+- External digest-pinned registries and the Python/FastAPI deployment, rollback, and recovery lifecycle remain supported compatibility paths
+- Product, Rust workspace, and internal Node package versions are aligned on `1.0.0-rc.1`
+- Rust CI and release builds use the fixed 1.97.1 toolchain rather than the superseded 1.97.0 compiler
+- Release tags build the full test container—including Rust workspace tests—before publishing archives or bundles
+- Local source-install identities include compiled Node artifacts, preventing stale release-directory reuse after module-only changes
 
-### Removed
+### Not yet accepted as operationally stable
 
-- Duplicate Gitea workflows and Gitea runner registration examples
+- Service Blueprint and CrownFi CI migration to the Arcturus publisher
+- Release-aware retention pins and reviewed Distribution garbage collection
+- Clean-host installation, live-host upgrade, real GitHub Actions upload, interruption/retry, registry-restart, registry-unavailable rollback, and Gitea-offline acceptance runs
+- Rust ownership of deployment activation, rollback, and recovery; Python remains the tested lifecycle owner
 
 ## [0.99.0-rc.2] - 2026-07-15
 

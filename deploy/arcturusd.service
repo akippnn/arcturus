@@ -1,6 +1,7 @@
 [Unit]
-Description=Arcturus Rust OCI authorization preview
-After=network.target
+Description=Arcturus Rust OCI authorization and artifact verification
+After=network-online.target
+Wants=network-online.target
 Before=arcturus-oci-registry.service
 
 [Service]

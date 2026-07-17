@@ -1,6 +1,6 @@
 {
   "name": "arcturus-registry",
-  "version": "0.99.0-rc.1",
+  "version": "1.0.0-rc.1",
   "description": "Arcturus Registry Module - discovers and validates stack manifests",
   "main": "dist/index.js",
   "type": "module",

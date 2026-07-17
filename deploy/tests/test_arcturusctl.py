@@ -152,7 +152,7 @@ class ProjectConfigurationTests(unittest.TestCase):
             responses = [
                 {
                     "status": "ok",
-                    "version": "0.99.0-rc.2",
+                    "version": "1.0.0-rc.1",
                     "features": ["authenticated-preflight", "legacy-compose-handoff"],
                 },
                 {"status": "ready"},

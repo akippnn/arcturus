@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -311,6 +312,117 @@ class DeployerTests(unittest.TestCase):
             route_status_file=status,
         )
         return deployer, status
+
+    @staticmethod
+    def receipt_database(path: Path, *, revision: str = COMMIT_A, digest: str = DIGEST_A) -> Path:
+        database = path / "oci-auth.sqlite3"
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "CREATE TABLE artifact_receipts ("
+            "id TEXT PRIMARY KEY, upload_id TEXT NOT NULL, service TEXT NOT NULL, "
+            "component TEXT NOT NULL, repository TEXT NOT NULL, revision TEXT NOT NULL, "
+            "manifest_digest TEXT NOT NULL, status TEXT NOT NULL, accepted_at INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO artifact_receipts "
+            "(id,upload_id,service,component,repository,revision,manifest_digest,status,accepted_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "receipt-web",
+                "upload-1",
+                "example-portal",
+                "web",
+                "example-portal/web",
+                revision,
+                digest,
+                "accepted",
+                1_700_000_000,
+            ),
+        )
+        connection.commit()
+        connection.close()
+        return database
+
+    def test_external_registry_does_not_require_an_arcturus_receipt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            deployer = self.make_deployer(Path(temp_dir), FakeRunner())
+            result = deployer.preflight(self.request().manifest)
+            self.assertEqual(result["checked"]["artifact_receipts"], [])
+
+    def test_owned_registry_requires_matching_receipts(self):
+        raw = manifest()
+        raw["spec"]["components"] = {"web": raw["spec"]["components"]["web"]}
+        raw["spec"]["components"]["web"]["dependsOn"] = []
+        raw["spec"]["components"]["web"]["image"] = (
+            f"arcturus-oci.example.ts.net/example-portal/web@{DIGEST_A}"
+        )
+        release = ServiceRelease.model_validate(raw)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            database = self.receipt_database(base)
+            deployer = ReleaseDeployer(
+                state_dir=base / "state",
+                quadlet_dir=base / "quadlets",
+                systemd_dir=base / "systemd",
+                allowed_bind_roots=[Path("/srv")],
+                runner=FakeRunner(),
+                podman=FakePodman(),
+                validate_generator=False,
+                artifact_receipt_db=database,
+                owned_registry_host="arcturus-oci.example.ts.net",
+            )
+            result = deployer.preflight(release)
+            self.assertEqual(result["checked"]["artifact_receipts"], ["receipt-web"])
+
+    def test_owned_registry_rejects_missing_or_mismatched_receipt(self):
+        raw = manifest(COMMIT_B, DIGEST_B)
+        raw["spec"]["components"] = {"web": raw["spec"]["components"]["web"]}
+        raw["spec"]["components"]["web"]["dependsOn"] = []
+        raw["spec"]["components"]["web"]["image"] = (
+            f"arcturus-oci.example.ts.net/example-portal/web@{DIGEST_B}"
+        )
+        release = ServiceRelease.model_validate(raw)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            database = self.receipt_database(base)
+            deployer = ReleaseDeployer(
+                state_dir=base / "state",
+                quadlet_dir=base / "quadlets",
+                systemd_dir=base / "systemd",
+                allowed_bind_roots=[Path("/srv")],
+                runner=FakeRunner(),
+                podman=FakePodman(),
+                validate_generator=False,
+                artifact_receipt_db=database,
+                owned_registry_host="arcturus-oci.example.ts.net",
+            )
+            with self.assertRaisesRegex(RuntimeError, "accepted Arcturus artifact receipt not found"):
+                deployer.preflight(release)
+
+    def test_owned_registry_rejects_cross_component_repository(self):
+        raw = manifest()
+        raw["spec"]["components"] = {"web": raw["spec"]["components"]["web"]}
+        raw["spec"]["components"]["web"]["dependsOn"] = []
+        raw["spec"]["components"]["web"]["image"] = (
+            f"arcturus-oci.example.ts.net/example-portal/api@{DIGEST_A}"
+        )
+        release = ServiceRelease.model_validate(raw)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            database = self.receipt_database(base)
+            deployer = ReleaseDeployer(
+                state_dir=base / "state",
+                quadlet_dir=base / "quadlets",
+                systemd_dir=base / "systemd",
+                allowed_bind_roots=[Path("/srv")],
+                runner=FakeRunner(),
+                podman=FakePodman(),
+                validate_generator=False,
+                artifact_receipt_db=database,
+                owned_registry_host="arcturus-oci.example.ts.net",
+            )
+            with self.assertRaisesRegex(RuntimeError, "repository mismatch"):
+                deployer.preflight(release)
 
     def test_preflight_reports_missing_host_resources(self):
         raw = manifest()

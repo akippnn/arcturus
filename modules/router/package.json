@@ -1,6 +1,6 @@
 {
   "name": "arcturus-router",
-  "version": "0.99.0-rc.1",
+  "version": "1.0.0-rc.1",
   "description": "Arcturus Router Module - generates nginx configs from Registry",
   "main": "dist/index.js",
   "type": "module",

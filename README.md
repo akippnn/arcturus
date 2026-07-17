@@ -2,7 +2,7 @@
 
 Arcturus is a manifest-driven application platform for deploying immutable OCI releases to a single AlmaLinux host with rootless Podman, Quadlet, and user systemd.
 
-> **Status:** post-`v0.99.0-rc.2` development. The active deployment lifecycle still runs through the tested Python/FastAPI compatibility service while Rust assumes OCI upload authorization in reversible slices. The Arcturus-owned OCI data plane is host-local, authenticated, loopback-only, read-only, and not yet the public CI upload path.
+> **Status:** `v1.0.0-rc.1` source candidate for the stable `v1.0.0` release; operational acceptance is still pending. The tested Python/FastAPI service still owns manifest-v2 activation, rollback, and recovery. Rust owns short-lived OCI upload authorization, server-side artifact verification, and immutable receipts. Authenticated writable ingress is private to a dedicated Tailscale Service and fails closed to read-only mode. CrownFi/blueprint migration, release-aware retention/GC, and the real-host acceptance matrix remain release gates.
 
 Arcturus deliberately targets the space between hand-maintained Compose deployments and a full container orchestrator. CI builds images and resolves their digests; Arcturus validates a release manifest, renders generated Quadlets, activates the release, verifies readiness, publishes routing state, and restores the previous healthy release when activation fails.
 
@@ -36,12 +36,12 @@ Arcturus does **not** build images on the production host, deploy floating tags,
 ```text
 GitHub repository + GitHub Actions
         |
-        | current compatibility: build + external digest reference
-        | target: short-lived grant + direct OCI upload over Tailscale
+        | preferred: short-lived grant + direct OCI upload over Tailscale
+        | compatibility: external digest-pinned registry
         v
 Arcturus control plane
-  Rust OCI authorization -> accepted artifact receipt (next slice)
-  Python/FastAPI lifecycle compatibility -> validate -> activate -> rollback
+  Rust OCI authorization -> verify manifests/blobs -> immutable receipts
+  Python/FastAPI manifest-v2 lifecycle -> receipt gate -> activate -> rollback
         |
         v
 Arcturus-owned OCI storage + rootless Podman Quadlets + user systemd
@@ -112,7 +112,7 @@ arcturusctl token create \
   --output "$HOME/.config/arcturus/my-api-ci.token"
 ```
 
-Copy only the output file's value into the project's protected `ARCTURUS_DEPLOY_TOKEN` CI secret. Existing blueprints still need registry push credentials while using the external-registry compatibility path. The target flow instead exchanges the service-scoped Arcturus token for a short-lived repository-scoped upload grant and pushes directly to the Arcturus OCI endpoint. Artifact receipts and deployment receipt enforcement must land before that target path replaces compatibility deployment.
+Copy only the output file's value into the project's protected `ARCTURUS_DEPLOY_TOKEN` CI secret. The preferred OCI path exchanges this service-scoped token for a short-lived repository-scoped grant, pushes directly to Arcturus over Tailscale, completes server-side verification, and deploys the unchanged manifest-v2 release using accepted digests. See [Arcturus OCI ingress](docs/oci-ingress.md). External registry credentials are needed only for the compatibility path.
 
 The blueprint records its setup intent so future migrations can be applied by dropping in a newer blueprint and running `./scripts/arcturus-update apply`.
 
@@ -162,18 +162,19 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 
 Product versions and manifest API versions are independent:
 
-- Product release candidate: `v0.99.0-rc.2`
-- Stable product target: `v1.0.0`
+- Current product candidate: `v1.0.0-rc.1`
+- Stable release target: `v1.0.0`
+- Operational acceptance: pending the gates below
 - Current manifest API: `arcturus.u128.org/v2`
 - Legacy routing/stack API: `arcturus.u128.org/v1`
 
-The RC2 Service Blueprint requires the RC2 host capabilities `authenticated-preflight` and `legacy-compose-handoff`. The generated lockfile and the CLI preflight make that dependency explicit and reject an older host before application image builds begin. See [`COMPATIBILITY.json`](COMPATIBILITY.json).
+The currently compatible Service Blueprint requires the host capabilities `authenticated-preflight` and `legacy-compose-handoff`. The generated lockfile and the CLI preflight make that dependency explicit and reject an older host before application image builds begin. See [`COMPATIBILITY.json`](COMPATIBILITY.json).
 
-Product v1.0 will stabilize the existing manifest API v2. See the [roadmap](docs/ROADMAP.md).
+Product v1.0 preserves and stabilizes the existing manifest API v2. See the [roadmap](docs/ROADMAP.md).
 
 ## Security
 
-Keep the deployment API on loopback or a private network, use one service-scoped token per CI identity, and provision application secrets directly on the host. While compatibility deployment remains enabled, keep host pull-only credentials separate from CI push credentials; the target Arcturus OCI flow replaces the CI push credential with short-lived scoped grants. Report vulnerabilities using [SECURITY.md](SECURITY.md).
+Keep control-plane backends on loopback, expose OCI/API routes only through the dedicated private Tailscale HTTPS service, use one service-scoped control token per CI identity, and provision application secrets directly on the host. Arcturus-owned uploads use short-lived scoped registry grants; compatibility registries must keep host pull-only credentials separate from CI push credentials. Report vulnerabilities using [SECURITY.md](SECURITY.md).
 
 ## License
 

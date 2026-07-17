@@ -99,45 +99,47 @@ The installer provides user units for:
 It creates the runtime socket directory, state directories, active-manifest directory, Quadlet directory, and the external routing network when absent. It enables user lingering so services can start without an interactive session.
 
 
-## Optional local OCI data plane
+## Optional Arcturus-owned OCI ingress
 
-The target GitHub-to-Arcturus artifact flow uses an Arcturus-owned OCI registry rather than Gitea. The current host slice installs storage on loopback only; remote upload authorization is added separately.
+The preferred GitHub-to-Arcturus path stores application images in a loopback Distribution registry and exposes it only through a dedicated Tailscale HTTPS Service.
 
-Enable it with a digest-pinned Distribution image:
+Use a supported Distribution v3 image and pin it by digest. The `v1.0.0-rc.1` source freeze uses v3.1.1 as the current stable reference, including the upstream fix for CVE-2026-41888. The installer cannot infer security support from an arbitrary digest, so review upstream advisories and verify the selected release before installation.
+
+For a storage-only compatibility installation, provide only the digest-pinned Distribution image. The registry remains read-only:
 
 ```bash
 ./deploy/install-host.sh [existing options] \
-  --oci-registry-image 'registry.example.org/distribution/distribution@sha256:<digest>' \
+  --oci-registry-image 'registry.example.org/distribution/distribution:v3.1.1@sha256:<digest>' \
   --oci-registry-port 9443
 ```
 
-Storage defaults to `~/.local/share/arcturus-registry`. The installer preserves a protected registry HTTP secret, keeps the registry read-only, disables manifest deletion, and verifies `http://127.0.0.1:9443/v2/` before completing.
-
-### Optional local token authorization
-
-Install the Rust authorization service and configure Distribution to verify its Ed25519-signed registry tokens:
+For authenticated writable ingress, configure the complete boundary in one installation:
 
 ```bash
 ./deploy/install-host.sh [existing options] \
-  --oci-registry-image 'registry.example.org/distribution/distribution@sha256:<digest>' \
+  --oci-registry-image 'registry.example.org/distribution/distribution:v3.1.1@sha256:<digest>' \
   --oci-registry-port 9443 \
-  --enable-oci-auth
+  --enable-oci-auth \
+  --oci-registry-host registry.example-tailnet.ts.net \
+  --oci-tailscale-service svc:arcturus-oci
 ```
 
-This explicit opt-in:
+This mode:
 
-- starts `arcturusd` only on `127.0.0.1:9190`;
-- creates a protected Ed25519 seed at `~/.config/arcturus/oci-signing.seed`;
-- writes grants and the public JWKS beneath the dedicated mode-0700 `~/.local/share/arcturus-oci-auth` state directory and mounts only the JWKS read-only into Distribution;
-- configures the registry token issuer, audience, realm, JWKS verifier, and an EdDSA-only verification allowlist;
-- preserves the signing key, JWKS, and grant database across disable/re-enable cycles;
-- keeps registry storage read-only and manifest deletion disabled.
+- starts Distribution only on `127.0.0.1:<port>` and `arcturusd` only on `127.0.0.1:9190`;
+- creates and preserves a protected Ed25519 signing seed, public JWKS, grant/receipt database, registry HTTP secret, and persistent blob storage;
+- configures Distribution to trust only the Rust issuer and EdDSA JWKS;
+- routes `/v2/*` to Distribution and API/token routes to Rust through private Tailscale HTTPS;
+- verifies the service's anonymous `/v2/` response is the expected `401` Bearer challenge;
+- requires Tailscale 1.98.9 or newer and enough free storage for at least two maximum-sized artifacts;
+- unlocks writes only after all checks pass and returns the registry to read-only if post-unlock validation fails;
+- enables manifest-v2 receipt enforcement for images hosted at the configured Arcturus registry hostname.
 
-With authorization enabled, an anonymous request to `/v2/` must return HTTP `401` with a Bearer challenge for service `arcturus-oci`; anonymous HTTP `200` is no longer the readiness condition. Disable only the token layer with `--disable-oci-auth`, or remove the local data-plane unit with `--disable-oci-registry`.
+Storage defaults to `~/.local/share/arcturus-registry`. A local-source installation with `--enable-oci-auth` requires a compiled `deploy/arcturusd`; production bundles include it.
 
-A local-source installation using `--enable-oci-auth` also requires a compiled executable at `deploy/arcturusd`. Production bundles build this binary automatically with the pinned Rust toolchain.
+Disable token authorization with `--disable-oci-auth`, which returns the loopback registry to read-only mode and drains and clears any recorded dedicated Tailscale Service. Use `--disable-oci-registry` to remove the generated registry unit and managed configuration; it also clears the recorded Service. Blob storage is preserved in either case.
 
-This phase still creates no public or tailnet listener and no CI registry credential. See [Arcturus OCI ingress](oci-ingress.md) for the boundary and staged rollout.
+See [Arcturus OCI ingress](oci-ingress.md) and [OCI upload grants, verification, and receipts](oci-upload-authorization.md).
 
 ## Configuration preservation
 

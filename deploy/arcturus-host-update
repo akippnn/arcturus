@@ -76,6 +76,7 @@ value_options = {
     '--allowed-bind-root', '--network', '--vhosts-dir', '--nginx-container',
     '--base-domain', '--cert-domain', '--container-cli',
     '--oci-registry-image', '--oci-registry-port', '--oci-registry-storage',
+    '--oci-registry-host', '--oci-tailscale-service',
 }
 flag_options = {'--configure-firewall', '--enable-oci-auth', '--disable-oci-auth', '--disable-oci-registry'}
 transient_value = {'--bundle', '--source-dir', '--version'}

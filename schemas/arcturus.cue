@@ -1,21 +1,23 @@
 // arcturus.cue - CUE schema for Arcturus stack manifests
 package arcturus
 
+import "strings"
+
 // The top-level value must be a Stack
 #Stack: {
 	apiVersion: "arcturus.u128.org/v1"
 	kind:       "Stack"
 
 	metadata: {
-		name:      string
-		namespace: string | *"default"
-		labels?: [string]: string
-		annotations?: [string]: string
+		name:      =~"^[a-z0-9][a-z0-9_-]{0,62}$"
+		namespace: =~"^[a-z0-9][a-z0-9_-]{0,62}$" | *"default"
+		labels?: [=~"^.{1,128}$"]: string & strings.MaxRunes(1024)
+		annotations?: [=~"^.{1,128}$"]: string & strings.MaxRunes(2048)
 	}
 
 	spec: {
-		services: [string]: #Service
-		redirects?: [string]: #Redirect
+		services: [=~"^[a-z0-9][a-z0-9_-]{0,62}$"]: #Service
+		redirects?: [=~"^[a-z0-9][a-z0-9_-]{0,62}$"]: #Redirect
 		network?: {
 			isolate: bool | *true
 			external?: [...string]
@@ -36,20 +38,20 @@ package arcturus
 #Service: {
 	port:     int & >0 & <65536
 	protocol: "http" | "https" | "tcp" | "udp" | *"http"
-	domains?: [...string]
-	aliases?: [...string]
+	domains?: [...=~"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$"]
+	aliases?: [...=~"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"]
 	type:     "proxy" | "static" | "tcp-forward" | "udp-forward" | *"proxy"
 	websocket?:    bool | *false
-	maxBodySize?:  string | *"1G"
-	nginxExtras?:  string
-	healthCheck?:  string
-	containerName?: string
+	maxBodySize?:  =~"^[1-9][0-9]{0,8}[kKmMgG]?$" | *"1G"
+	nginxExtras?:  =~"^[^{}\r\n\x00]*$" & strings.MaxRunes(4096)
+	healthCheck?:  string & strings.MaxRunes(2048)
+	containerName?: =~"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
 }
 
 #Redirect: {
-	from:  string
-	to:    string
-	code?: int & >=300 & <400 | *301
+	from:  =~"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$"
+	to:    =~"^https?://"
+	code?: 301 | 302 | 307 | 308 | *301
 }
 
 #ServiceRelease: {

@@ -6,6 +6,9 @@ import secrets
 import sqlite3
 import base64
 import hashlib
+import fcntl
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -20,7 +23,7 @@ load_dotenv()
 
 app = FastAPI(title="Arcturus Deploy Service")
 
-ARCTURUS_PRODUCT_VERSION = "1.0.0-rc.1"
+ARCTURUS_PRODUCT_VERSION = "1.0.0-rc.2"
 ARCTURUS_FEATURES = [
     "authenticated-preflight",
     "legacy-compose-handoff",
@@ -30,6 +33,9 @@ ARCTURUS_FEATURES = [
     "receipt-enforced-owned-registry",
     "tailscale-private-oci-ingress",
     "bounded-artifact-verification",
+    "manifest-v1-safe-routing-mirror",
+    "manifest-v1-provenance-routing",
+    "legacy-v1-service-scoped-deploy",
 ]
 
 STACKS_BASE = Path(os.getenv("STACKS_BASE_DIR", "/data/stacks"))
@@ -45,6 +51,13 @@ TOKEN_FILE = Path(
 )
 LEGACY_TOKEN_FILE = Path(
     os.getenv("LEGACY_RUNNER_TOKENS_FILE", Path.home() / "stacks/.runner-data/tokens.json")
+)
+LEGACY_ALLOW_MUTABLE_MAIN = os.getenv("ARCTURUS_LEGACY_ALLOW_MUTABLE_MAIN", "0") == "1"
+LEGACY_STATE_DIR = Path(
+    os.getenv(
+        "ARCTURUS_LEGACY_STATE_DIR",
+        Path.home() / ".local/share/arcturus-deployer/legacy-v1",
+    )
 )
 V2_STATE_DB = Path(
     os.getenv(
@@ -234,7 +247,7 @@ def verify_auth(authorization: str | None = Header(None)):
 
 
 def authorize_service(authorization: str | None, service: str) -> None:
-    """Authenticate a v2 request and enforce token scopes when present.
+    """Authenticate a service operation and enforce token scopes when present.
 
     Existing tokens without a services field remain global during migration.
     Newly issued tokens must carry an explicit services list.
@@ -291,6 +304,103 @@ def resolve_stack_dir(stack: str) -> Path:
     if base != stack_dir and base not in stack_dir.parents:
         raise HTTPException(400, "Stack path escapes STACKS_BASE_DIR")
     return stack_dir
+
+
+@contextmanager
+def legacy_stack_lock(stack: str):
+    lock_dir = LEGACY_STATE_DIR / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_dir.chmod(0o700)
+    lock_path = lock_dir / f"{stack}.lock"
+    lock_path.touch(mode=0o600, exist_ok=True)
+    lock_path.chmod(0o600)
+    with lock_path.open("a+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise HTTPException(409, f"Legacy deployment already in progress for {stack}") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def resolve_origin_default_ref(stack_dir: Path, git: list[str]) -> str:
+    """Resolve the fetched origin default branch without assuming GitHub naming."""
+    symbolic = subprocess.run(
+        [*git, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        cwd=stack_dir,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    candidate = symbolic.stdout.strip() if symbolic.returncode == 0 else ""
+    if re.fullmatch(r"origin/[A-Za-z0-9][A-Za-z0-9._/-]*", candidate) and not any(
+        token in candidate for token in ("..", "@{", "//")
+    ):
+        return candidate
+
+    # Older clones often lack refs/remotes/origin/HEAD. Ask Git to refresh it
+    # from the remote's advertised HEAD, then retry without trusting shell text.
+    subprocess.run(
+        [*git, "remote", "set-head", "origin", "--auto"],
+        cwd=stack_dir,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    symbolic = subprocess.run(
+        [*git, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        cwd=stack_dir,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    candidate = symbolic.stdout.strip() if symbolic.returncode == 0 else ""
+    if re.fullmatch(r"origin/[A-Za-z0-9][A-Za-z0-9._/-]*", candidate) and not any(
+        token in candidate for token in ("..", "@{", "//")
+    ):
+        return candidate
+
+    for fallback in ("origin/main", "origin/master"):
+        exists = subprocess.run(
+            [*git, "rev-parse", "--verify", f"{fallback}^{{commit}}"],
+            cwd=stack_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if exists.returncode == 0:
+            return fallback
+    raise RuntimeError("cannot resolve origin default branch")
+
+
+def write_legacy_receipt(stack: str, payload: dict) -> None:
+    receipt_dir = LEGACY_STATE_DIR / "receipts"
+    receipt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    receipt_dir.chmod(0o700)
+    destination = receipt_dir / f"{stack}.json"
+    temporary = receipt_dir / f".{stack}.{secrets.token_hex(8)}.tmp"
+    serialized = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        destination.chmod(0o600)
+        directory_fd = os.open(receipt_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def domain_to_cname(domain: str) -> str:
@@ -439,91 +549,140 @@ def deploy(
     authorization: str | None = Header(None),
 ):
     response.headers["Deprecation"] = "true"
-    response.headers["Sunset"] = "Wed, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Warning"] = '299 Arcturus "Legacy manifest-v1 deploy compatibility; migrate lifecycle ownership to /v1/deployments"'
     response.headers["Link"] = '</v1/deployments>; rel="successor-version"'
-    verify_auth(authorization)
-    if req.domain == DOMAIN and req.stack != APEX_SERVICE:
-        raise HTTPException(403, f"Only the configured apex service may bind to {DOMAIN}.")
-    stack_dir = resolve_stack_dir(req.stack)
-    if is_v2_managed(req.stack):
-        raise HTTPException(
-            409,
-            f"Stack '{req.stack}' is managed by the v2 Quadlet deployer",
-        )
-    if not stack_dir.exists():
-        raise HTTPException(404, f"Stack '{req.stack}' not found at {stack_dir}")
-
-    # Git Sync: if stack directory is a git repository, fetch and sync it
-    if (stack_dir / ".git").exists():
-        print(f"Syncing git repository for stack: {req.stack}")
-        try:
-            git = ["git", "-c", f"safe.directory={stack_dir}"]
-            subprocess.run(
-                [*git, "fetch", "origin"],
-                cwd=stack_dir,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=120,
+    authorize_service(authorization, req.stack)
+    with legacy_stack_lock(req.stack):
+        if req.action == "apply" and not req.deploy_trigger and not LEGACY_ALLOW_MUTABLE_MAIN:
+            raise HTTPException(400, "Legacy apply requires deploy_trigger with the full 40-character Git SHA")
+        if req.domain == DOMAIN and req.stack != APEX_SERVICE:
+            raise HTTPException(403, f"Only the configured apex service may bind to {DOMAIN}.")
+        stack_dir = resolve_stack_dir(req.stack)
+        if is_v2_managed(req.stack):
+            raise HTTPException(
+                409,
+                f"Stack '{req.stack}' is managed by the v2 Quadlet deployer",
             )
-            target_ref = req.deploy_trigger if req.deploy_trigger else "origin/main"
-            if req.deploy_trigger:
+        if not stack_dir.exists():
+            raise HTTPException(404, f"Stack '{req.stack}' not found at {stack_dir}")
+        is_git_checkout = (stack_dir / ".git").exists()
+        if req.action == "apply" and req.deploy_trigger and not is_git_checkout:
+            raise HTTPException(409, "Legacy immutable apply requires the stack directory to be a Git checkout")
+
+        # Git Sync: if stack directory is a git repository, fetch and sync it
+        resolved_revision = ""
+        if is_git_checkout:
+            print(f"Syncing git repository for stack: {req.stack}")
+            try:
+                git = ["git", "-c", f"safe.directory={stack_dir}"]
                 subprocess.run(
-                    [*git, "merge-base", "--is-ancestor", req.deploy_trigger, "origin/main"],
+                    [*git, "fetch", "origin"],
+                    cwd=stack_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                default_ref = resolve_origin_default_ref(stack_dir, git)
+                target_ref = req.deploy_trigger.lower() if req.deploy_trigger else default_ref
+                if req.deploy_trigger:
+                    subprocess.run(
+                        [*git, "rev-parse", "--verify", f"{target_ref}^{{commit}}"],
+                        cwd=stack_dir,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    subprocess.run(
+                        [*git, "merge-base", "--is-ancestor", target_ref, default_ref],
+                        cwd=stack_dir,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                subprocess.run(
+                    [*git, "reset", "--hard", target_ref],
+                    cwd=stack_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                resolved_head = subprocess.run(
+                    [*git, "rev-parse", "HEAD"],
                     cwd=stack_dir,
                     check=True,
                     capture_output=True,
                     text=True,
                     timeout=30,
-                )
-            subprocess.run(
-                [*git, "reset", "--hard", target_ref],
-                cwd=stack_dir,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            print(f"Git sync complete. Target ref: {target_ref}")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            detail = getattr(exc, "stderr", "") or str(exc)
+                ).stdout.strip().lower()
+                if req.deploy_trigger and resolved_head != target_ref:
+                    raise RuntimeError("checked out revision does not match deploy_trigger")
+                resolved_revision = resolved_head
+                print(f"Git sync complete. Target ref: {target_ref}")
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
+                detail = getattr(exc, "stderr", "") or str(exc)
+                raise HTTPException(
+                    500,
+                    f"Git sync failed for {req.stack}: {redact(detail)}",
+                ) from exc
+
+        terraform_domain = read_stack_domain(stack_dir)
+        if req.domain and terraform_domain and req.domain != terraform_domain:
+            raise HTTPException(400, "Webhook domain does not match the stack Terraform domain")
+        domain = req.domain or terraform_domain
+        if domain and (
+            not is_valid_domain(domain)
+            or (domain != DOMAIN and not domain.endswith(f".{DOMAIN}"))
+        ):
+            raise HTTPException(400, f"Stack Terraform contains an invalid domain: {domain}")
+        if domain == DOMAIN and req.stack != APEX_SERVICE:
+            raise HTTPException(403, f"Only the configured apex service may bind to {DOMAIN}.")
+
+        result = run_terraform(stack_dir, req.action, req.deploy_trigger)
+        if result["status"] != "ok":
+            discord_notify(f"Stack **{req.stack}**: terraform {req.action} ❌", "error")
             raise HTTPException(
                 500,
-                f"Git sync failed for {req.stack}: {redact(detail)}",
-            ) from exc
-
-    terraform_domain = read_stack_domain(stack_dir)
-    if req.domain and terraform_domain and req.domain != terraform_domain:
-        raise HTTPException(400, "Webhook domain does not match the stack Terraform domain")
-    domain = req.domain or terraform_domain
-    if domain and (
-        not is_valid_domain(domain)
-        or (domain != DOMAIN and not domain.endswith(f".{DOMAIN}"))
-    ):
-        raise HTTPException(400, f"Stack Terraform contains an invalid domain: {domain}")
-    if domain == DOMAIN and req.stack != APEX_SERVICE:
-        raise HTTPException(403, f"Only the configured apex service may bind to {DOMAIN}.")
-
-    result = run_terraform(stack_dir, req.action, req.deploy_trigger)
-    if result["status"] != "ok":
-        discord_notify(f"Stack **{req.stack}**: terraform {req.action} ❌", "error")
-        raise HTTPException(
-            500,
-            {
-                "status": "error",
-                "step": result.get("step", req.action),
-                "output": redact(result.get("output", "Terraform failed")),
-            },
+                {
+                    "status": "error",
+                    "step": result.get("step", req.action),
+                    "output": redact(result.get("output", "Terraform failed")),
+                },
+            )
+        if result["status"] == "ok":
+            if req.action == "apply" and domain:
+                cname = domain_to_cname(domain)
+                cloudflare_dns(cname, DOMAIN, "upsert")
+            elif req.action == "destroy" and domain:
+                cname = domain_to_cname(domain)
+                cloudflare_dns(cname, DOMAIN, "delete")
+        revision = (
+            req.deploy_trigger.lower()
+            if req.deploy_trigger
+            else (resolved_revision or "mutable-non-git")
+            if req.action == "apply"
+            else "not-applicable"
         )
-    if result["status"] == "ok":
-        if req.action == "apply" and domain:
-            cname = domain_to_cname(domain)
-            cloudflare_dns(cname, DOMAIN, "upsert")
-        elif req.action == "destroy" and domain:
-            cname = domain_to_cname(domain)
-            cloudflare_dns(cname, DOMAIN, "delete")
-    discord_notify(f"Stack **{req.stack}**: terraform {req.action} {'✅' if result['status']=='ok' else '❌'}", "error" if result["status"]=="error" else "info")
-    return result
+        write_legacy_receipt(req.stack, {
+            "apiVersion": "arcturus.u128.org/legacy-receipt/v1",
+            "service": req.stack,
+            "revision": revision,
+            "action": req.action,
+            "status": "succeeded",
+            "completedAt": datetime.now(timezone.utc).isoformat(),
+            "safety": (
+                "immutable-revision"
+                if req.deploy_trigger
+                else ("explicit-mutable-compatibility" if req.action == "apply" else "destructive-operation")
+            ),
+        })
+        discord_notify(f"Stack **{req.stack}**: terraform {req.action} {'✅' if result['status']=='ok' else '❌'}", "error" if result["status"]=="error" else "info")
+        result["revision"] = revision
+        result["compatibility"] = "manifest-v1"
+        return result
 
 
 @app.post("/v1/deployments")

@@ -10,6 +10,8 @@ const STACK_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const RUNTIME_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const DNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const BODY_SIZE_RE = /^[1-9][0-9]{0,8}[kKmMgG]?$/;
+const REVISION_RE = /^[0-9a-f]{40}$/;
+const MANIFEST_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 // Minimal Stack type for Router (avoid cross-module import)
 interface Stack {
   metadata: { name: string; annotations?: Record<string, string> };
@@ -41,6 +43,8 @@ export interface RouterConfig {
   statusFile?: string;
   containerCli?: "podman" | "docker";
   commandRunner?: (command: string, args: string[]) => void;
+  legacyV1Mode?: "enforce" | "audit";
+  allowLegacyNginxExtras?: boolean;
 }
 
 export class Router {
@@ -92,6 +96,7 @@ export class Router {
     this.assertStackName(name);
     this.assertDomain(certDomain);
     this.assertDomain(this.config.baseDomain);
+    this.assertRoutingProvenance(stack);
 
     // Redirect server blocks
     if (spec.redirects) {
@@ -120,8 +125,13 @@ export class Router {
       if (service.maxBodySize && !BODY_SIZE_RE.test(service.maxBodySize)) {
         throw new Error(`Invalid maxBodySize for ${name}/${serviceName}`);
       }
-      if (service.nginxExtras && (service.nginxExtras.length > 4096 || /[{}]/.test(service.nginxExtras))) {
-        throw new Error(`Unsafe nginxExtras for ${name}/${serviceName}`);
+      if (service.nginxExtras) {
+        if (!this.config.allowLegacyNginxExtras) {
+          throw new Error(`nginxExtras is disabled for ${name}/${serviceName}; migrate to reviewed router configuration`);
+        }
+        if (service.nginxExtras.length > 4096 || /[{}\r\n\0]/.test(service.nginxExtras)) {
+          throw new Error(`Unsafe nginxExtras for ${name}/${serviceName}`);
+        }
       }
 
       const targetDomains = new Set<string>();
@@ -305,7 +315,9 @@ export class Router {
         : "";
       services[stack.metadata.name] = {
         status: failure ? "failed" : "published",
-        revision: stack.metadata.annotations?.["arcturus.u128.org/revision"] || "legacy",
+        revision: stack.metadata.annotations?.["arcturus.u128.org/revision"]
+          || stack.metadata.annotations?.["arcturus.u128.org/manifest-digest"]
+          || "legacy-unverified",
         deploymentId: stack.metadata.annotations?.["arcturus.u128.org/deployment-id"] || null,
         domains: routes.map(route => route.domain),
         upstreams: routes.map(route => route.upstream),
@@ -340,6 +352,42 @@ export class Router {
     return message
       .replace(/(authorization|token|password|secret|credential)(\s*[:=]\s*)\S+/gi, "$1$2[REDACTED]")
       .slice(0, 512);
+  }
+
+  private assertRoutingProvenance(stack: Stack): void {
+    const annotations = stack.metadata.annotations || {};
+    const revision = annotations["arcturus.u128.org/revision"] || "";
+    const manifestDigest = annotations["arcturus.u128.org/manifest-digest"] || "";
+    const source = annotations["arcturus.u128.org/compatibility-source"] || "";
+    const verifiedV2 = source === "v2" && REVISION_RE.test(revision) && revision !== "0".repeat(40);
+    let verifiedV1 = false;
+    if (source === "v1" && MANIFEST_DIGEST_RE.test(manifestDigest) && REVISION_RE.test(revision)) {
+      const canonical = structuredClone(stack) as Stack;
+      const canonicalAnnotations = { ...(canonical.metadata.annotations || {}) };
+      delete canonicalAnnotations["arcturus.u128.org/compatibility-source"];
+      delete canonicalAnnotations["arcturus.u128.org/manifest-digest"];
+      delete canonicalAnnotations["arcturus.u128.org/revision"];
+      if (Object.keys(canonicalAnnotations).length > 0) {
+        canonical.metadata.annotations = canonicalAnnotations;
+      } else {
+        delete canonical.metadata.annotations;
+      }
+      const digestHex = createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+      verifiedV1 = manifestDigest === `sha256:${digestHex}` && revision === digestHex.slice(0, 40);
+    }
+    if (verifiedV2 || verifiedV1) {
+      return;
+    }
+    if ((this.config.legacyV1Mode || "enforce") === "audit") {
+      console.warn(
+        `[Router] Routing stack '${stack.metadata.name}' lacks registry-issued provenance; ` +
+        `routing is temporarily allowed because audit mode is enabled.`,
+      );
+      return;
+    }
+    throw new Error(
+      `Routing stack '${stack.metadata.name}' lacks verified v1 manifest provenance or v2 release provenance`,
+    );
   }
 
   private assertStackName(name: string): void {

@@ -19,6 +19,10 @@ Usage: install-host.sh [options]
   --base-domain DOMAIN       Router-managed base domain
   --cert-domain DOMAIN       TLS certificate domain (default: base domain)
   --container-cli podman     Container CLI used by the router
+  --legacy-v1-mode MODE       enforce (default) or audit for temporary unverified v1 routing
+  --allow-legacy-nginx-extras Temporarily permit deprecated v1 nginxExtras (unsafe compatibility)
+  --allow-legacy-mutable-main  Temporarily allow old /deploy apply requests without an immutable SHA
+  --disallow-legacy-mutable-main Re-enable immutable-SHA enforcement for old /deploy requests
   --oci-registry-image IMAGE  Digest-pinned, supported Distribution v3 image; enables OCI storage
   --oci-registry-port PORT    Loopback OCI port (default: 9443)
   --oci-registry-storage DIR  Persistent OCI storage (default: ~/.local/share/arcturus-registry)
@@ -47,6 +51,12 @@ NGINX_CONTAINER="portal-nginx"
 BASE_DOMAIN=""
 CERT_DOMAIN=""
 CONTAINER_CLI="podman"
+LEGACY_V1_MODE=""
+ALLOW_LEGACY_NGINX_EXTRAS=false
+ALLOW_LEGACY_MUTABLE_MAIN=false
+LEGACY_V1_MODE_SET=false
+ALLOW_LEGACY_NGINX_EXTRAS_SET=false
+ALLOW_LEGACY_MUTABLE_MAIN_SET=false
 OCI_REGISTRY_IMAGE=""
 OCI_REGISTRY_PORT="9443"
 OCI_REGISTRY_PORT_SET=false
@@ -82,6 +92,10 @@ while (($#)); do
     --base-domain) BASE_DOMAIN="$2"; shift 2 ;;
     --cert-domain) CERT_DOMAIN="$2"; shift 2 ;;
     --container-cli) CONTAINER_CLI="$2"; shift 2 ;;
+    --legacy-v1-mode) LEGACY_V1_MODE="$2"; LEGACY_V1_MODE_SET=true; shift 2 ;;
+    --allow-legacy-nginx-extras) ALLOW_LEGACY_NGINX_EXTRAS=true; ALLOW_LEGACY_NGINX_EXTRAS_SET=true; shift ;;
+    --allow-legacy-mutable-main) ALLOW_LEGACY_MUTABLE_MAIN=true; ALLOW_LEGACY_MUTABLE_MAIN_SET=true; shift ;;
+    --disallow-legacy-mutable-main) ALLOW_LEGACY_MUTABLE_MAIN=false; ALLOW_LEGACY_MUTABLE_MAIN_SET=true; shift ;;
     --oci-registry-image) OCI_REGISTRY_IMAGE="$2"; shift 2 ;;
     --oci-registry-port) OCI_REGISTRY_PORT="$2"; OCI_REGISTRY_PORT_SET=true; shift 2 ;;
     --oci-registry-storage) OCI_REGISTRY_STORAGE="$2"; shift 2 ;;
@@ -120,8 +134,8 @@ if command -v podman >/dev/null 2>&1; then
     errors+=("Podman 5.8 or newer is required (found ${podman_version:-unknown})")
   fi
 fi
-if command -v systemd >/dev/null 2>&1 && [[ "$(systemd --version | awk 'NR==1 {print $2}')" -lt 257 ]]; then
-  errors+=("systemd 257 or newer is required")
+if command -v systemd >/dev/null 2>&1 && [[ "$(systemd --version | awk 'NR==1 {print $2}')" -lt 252 ]]; then
+  errors+=("systemd 252 or newer is required")
 fi
 QUADLET_GENERATOR="${ARCTURUS_QUADLET_GENERATOR:-/usr/lib/systemd/system-generators/podman-system-generator}"
 [[ -x "$QUADLET_GENERATOR" ]] || errors+=("Podman Quadlet generator is missing: $QUADLET_GENERATOR")
@@ -171,6 +185,7 @@ if [[ -n "$SOURCE_DIR" ]]; then
   done
 fi
 [[ "$CONTAINER_CLI" == podman ]] || errors+=("--container-cli must be podman")
+[[ "$LEGACY_V1_MODE" =~ ^(enforce|audit)$ || -z "$LEGACY_V1_MODE" ]] || errors+=("--legacy-v1-mode must be enforce or audit")
 [[ "$NGINX_CONTAINER" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || errors+=("invalid --nginx-container")
 if $CONFIGURE_FIREWALL && [[ -z "$RUNNER_CIDR" || -z "$LISTEN_ADDRESS" ]]; then
   errors+=("--configure-firewall requires --listen-address and --runner-cidr")
@@ -266,6 +281,24 @@ fi
 if [[ "$NGINX_CONTAINER" == portal-nginx ]]; then
   existing_nginx="$(read_existing_value "$existing_platform_config" NGINX_CONTAINER)"
   [[ -z "$existing_nginx" ]] || NGINX_CONTAINER="$existing_nginx"
+fi
+if ! $LEGACY_V1_MODE_SET; then
+  LEGACY_V1_MODE="$(read_existing_value "$existing_platform_config" ARCTURUS_LEGACY_V1_MODE)"
+  # Native v1 manifests are provenance-stamped by the registry, so normal
+  # upgrades can remain fail-closed. Audit mode is an explicit emergency bridge.
+  [[ -n "$LEGACY_V1_MODE" ]] || LEGACY_V1_MODE=enforce
+fi
+[[ "$LEGACY_V1_MODE" =~ ^(enforce|audit)$ ]] || {
+  echo "ARCTURUS_LEGACY_V1_MODE must be enforce or audit" >&2
+  exit 2
+}
+if ! $ALLOW_LEGACY_NGINX_EXTRAS_SET; then
+  existing_legacy_extras="$(read_existing_value "$existing_platform_config" ARCTURUS_ALLOW_LEGACY_NGINX_EXTRAS)"
+  [[ "$existing_legacy_extras" == 1 ]] && ALLOW_LEGACY_NGINX_EXTRAS=true
+fi
+if ! $ALLOW_LEGACY_MUTABLE_MAIN_SET; then
+  existing_mutable_main="$(read_existing_value "$existing_deployer_config" ARCTURUS_LEGACY_ALLOW_MUTABLE_MAIN)"
+  [[ "$existing_mutable_main" == 1 ]] && ALLOW_LEGACY_MUTABLE_MAIN=true
 fi
 existing_oci_service="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_TAILSCALE_SERVICE)"
 if $DISABLE_OCI_REGISTRY; then
@@ -549,6 +582,7 @@ ARCTURUS_REGISTRY_SOCKET=$RUNTIME_DIR/registry.sock
 ARCTURUS_OCI_REGISTRY_URL=${OCI_REGISTRY_IMAGE:+http://127.0.0.1:$OCI_REGISTRY_PORT}
 ARCTURUS_OCI_RECEIPT_DB=$([[ "$OCI_WRITABLE_ENABLED" == true ]] && printf '%s' "$OCI_AUTH_DB")
 ARCTURUS_OCI_REGISTRY_HOST=$([[ "$OCI_WRITABLE_ENABLED" == true ]] && printf '%s' "$OCI_REGISTRY_HOST")
+ARCTURUS_LEGACY_ALLOW_MUTABLE_MAIN=$($ALLOW_LEGACY_MUTABLE_MAIN && printf 1 || printf 0)
 EOF
 install_managed_env "$rendered_config" "$CONFIG_FILE"
 
@@ -564,6 +598,8 @@ NGINX_CONTAINER=$NGINX_CONTAINER
 BASE_DOMAIN=$BASE_DOMAIN
 CERT_DOMAIN=$CERT_DOMAIN
 CONTAINER_CLI=$CONTAINER_CLI
+ARCTURUS_LEGACY_V1_MODE=${LEGACY_V1_MODE:-enforce}
+ARCTURUS_ALLOW_LEGACY_NGINX_EXTRAS=$($ALLOW_LEGACY_NGINX_EXTRAS && printf 1 || printf 0)
 ARCTURUS_OCI_REGISTRY_URL=${OCI_REGISTRY_IMAGE:+http://127.0.0.1:$OCI_REGISTRY_PORT}
 EOF
 install_managed_env "$rendered_platform" "$PLATFORM_CONFIG_FILE"

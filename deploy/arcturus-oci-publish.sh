@@ -44,6 +44,16 @@ for command in curl buildah python3; do
   }
 done
 
+buildah_cmd=(buildah)
+if [[ -n "${ARCTURUS_BUILDAH_ROOT:-}" ]]; then
+  [[ "$ARCTURUS_BUILDAH_ROOT" == /* ]] || { echo "ARCTURUS_BUILDAH_ROOT must be absolute" >&2; exit 2; }
+  buildah_cmd+=(--root "$ARCTURUS_BUILDAH_ROOT")
+fi
+if [[ -n "${ARCTURUS_BUILDAH_RUNROOT:-}" ]]; then
+  [[ "$ARCTURUS_BUILDAH_RUNROOT" == /* ]] || { echo "ARCTURUS_BUILDAH_RUNROOT must be absolute" >&2; exit 2; }
+  buildah_cmd+=(--runroot "$ARCTURUS_BUILDAH_RUNROOT")
+fi
+
 workdir="$(mktemp -d)"
 authfile="$workdir/auth.json"
 curl_config="$workdir/curl.conf"
@@ -128,7 +138,7 @@ secret="${grant_fields[3]}"
   echo "upload grant registry does not match ARCTURUS_URL" >&2
   exit 1
 }
-printf '%s' "$secret" | buildah login --authfile "$authfile" --username "$username" --password-stdin "$registry" >/dev/null
+printf '%s' "$secret" | "${buildah_cmd[@]}" login --authfile "$authfile" --username "$username" --password-stdin "$registry" >/dev/null
 
 completion_pairs=()
 for index in "${!components[@]}"; do
@@ -144,8 +154,8 @@ for index in "${!components[@]}"; do
   }
 
   inspect="$workdir/inspect-$index.json"
-  buildah inspect --type image "$image" >"$inspect"
-  image_revision="$(python3 - "$inspect" <<'PY'
+  "${buildah_cmd[@]}" inspect --type image "$image" >"$inspect"
+  image_revision="$(python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 labels = {}
@@ -159,15 +169,14 @@ for path in (("Docker", "config", "Labels"), ("Docker", "Config", "Labels"), ("O
     if isinstance(node, dict):
         labels.update(node)
 print(labels.get("org.opencontainers.image.revision", ""))
-PY
-)"
+' "$inspect")"
   [[ "${image_revision,,}" == "$revision" ]] || {
     echo "image $image revision label does not match $revision" >&2
     exit 1
   }
 
   digest_file="$workdir/digest-$index"
-  buildah push --authfile "$authfile" --digestfile "$digest_file" \
+  "${buildah_cmd[@]}" push --authfile "$authfile" --digestfile "$digest_file" \
     "$image" "docker://$registry/$repository:upload-$upload_id" >/dev/null
   digest="$(tr -d '[:space:]' <"$digest_file")"
   [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
@@ -202,5 +211,40 @@ status="$(curl --silent --show-error --connect-timeout 10 --max-time "$completio
   cat "$response" >&2 || true
   exit 1
 }
+python3 - "$response" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+if value.get("status") != "accepted" or not isinstance(value.get("receipts"), list):
+    raise SystemExit("artifact completion response is invalid")
+for receipt in value["receipts"]:
+    component = receipt.get("component")
+    digest = receipt.get("manifestDigest")
+    if not isinstance(component, str) or not isinstance(digest, str):
+        raise SystemExit("artifact receipt is incomplete")
+PY
+if [[ -n "${ARCTURUS_OCI_RECEIPT_FILE:-}" ]]; then
+  mkdir -p "$(dirname "$ARCTURUS_OCI_RECEIPT_FILE")"
+  install -m 0600 "$response" "$ARCTURUS_OCI_RECEIPT_FILE"
+fi
+if [[ -n "${ARCTURUS_OCI_DIGEST_DIR:-}" ]]; then
+  mkdir -p "$ARCTURUS_OCI_DIGEST_DIR"
+  python3 - "$response" "$ARCTURUS_OCI_DIGEST_DIR" <<'PY'
+import json, os, pathlib, re, sys, tempfile
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+out = pathlib.Path(sys.argv[2])
+for receipt in value["receipts"]:
+    component = receipt["component"]
+    digest = receipt["manifestDigest"]
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", component):
+        raise SystemExit("invalid component in artifact receipt")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise SystemExit("invalid digest in artifact receipt")
+    fd, temporary = tempfile.mkstemp(dir=out, prefix=f".{component}.")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(digest + "\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, out / f"{component}.digest")
+PY
+fi
 cat "$response"
 printf '\n'

@@ -1,6 +1,7 @@
 // src/registry.ts - Core registry logic
 
 import { readFileSync, writeFileSync, watch, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import type { Stack, Service, Redirect, ServiceRelease } from "./schema.js";
 import { ManifestSchema, StackSchema } from "./schema.js";
@@ -12,6 +13,24 @@ const REDIRECT_ORDER = ["from", "to", "code"];
 const NETWORK_ORDER = ["isolate", "external"];
 const DEPLOY_ORDER = ["managed", "strategy", "autoUpdate", "healthCheck"];
 const SECURITY_ORDER = ["corsOrigins", "rateLimit"];
+
+const V1_REGISTRY_OWNED_ANNOTATIONS = [
+  "arcturus.u128.org/compatibility-source",
+  "arcturus.u128.org/manifest-digest",
+  "arcturus.u128.org/revision",
+  "arcturus.u128.org/deployment-id",
+] as const;
+
+function stripRegistryOwnedV1Annotations<T>(stack: T): T {
+  const sanitized = structuredClone(stack) as any;
+  const metadata = sanitized?.metadata;
+  if (!metadata || typeof metadata !== "object") return sanitized;
+  const annotations = metadata.annotations;
+  if (!annotations || typeof annotations !== "object" || Array.isArray(annotations)) return sanitized;
+  for (const key of V1_REGISTRY_OWNED_ANNOTATIONS) delete annotations[key];
+  if (Object.keys(annotations).length === 0) delete metadata.annotations;
+  return sanitized;
+}
 
 function sortObjectKeys<T extends Record<string, any>>(obj: T, order: string[]): T {
   const sorted: Record<string, any> = {};
@@ -71,7 +90,7 @@ function normalizeStack(stack: Stack): Stack {
   for (const [name, svc] of Object.entries(stack.spec.services)) {
     services[name] = normalizeService(svc);
   }
-  normalized.spec.services = sortObjectKeys(services, Object.keys(services));
+  normalized.spec.services = sortObjectKeys(services, Object.keys(services).sort());
 
   // Redirects
   if (stack.spec.redirects && Object.keys(stack.spec.redirects).length > 0) {
@@ -79,7 +98,7 @@ function normalizeStack(stack: Stack): Stack {
     for (const [name, redir] of Object.entries(stack.spec.redirects)) {
       redirects[name] = normalizeRedirect(redir);
     }
-    normalized.spec.redirects = sortObjectKeys(redirects, Object.keys(redirects));
+    normalized.spec.redirects = sortObjectKeys(redirects, Object.keys(redirects).sort());
   }
 
   // Network
@@ -211,7 +230,10 @@ export class StackRegistry {
     try {
       const raw = readFileSync(path, "utf-8");
       const json = JSON.parse(raw);
-      const result = ManifestSchema.safeParse(json);
+      const candidate = json?.apiVersion === "arcturus.u128.org/v1"
+        ? stripRegistryOwnedV1Annotations(json)
+        : json;
+      const result = ManifestSchema.safeParse(candidate);
       if (!result.success) {
         console.error(`Invalid manifest ${path}:`, result.error.format());
         return null;
@@ -227,7 +249,7 @@ export class StackRegistry {
         console.log(`Normalized manifest: ${path}`);
       }
 
-      return normalized;
+      return nativeV1RoutingStack(normalized);
     } catch (err) {
       console.error(`Failed to load manifest ${path}:`, (err as Error).message);
       return null;
@@ -282,6 +304,30 @@ export class StackRegistry {
   }
 }
 
+
+function nativeV1RoutingStack(stack: Stack): Stack {
+  const authored = stripRegistryOwnedV1Annotations(stack);
+  const annotations = { ...(authored.metadata.annotations || {}) };
+  // These values are registry-owned runtime provenance. Source values are
+  // sanitized before validation and regenerated from canonical content.
+  const canonical = JSON.stringify(authored);
+  const digestHex = createHash("sha256").update(canonical).digest("hex");
+  const digest = `sha256:${digestHex}`;
+  const revision = digestHex.slice(0, 40);
+  return StackSchema.parse({
+    ...authored,
+    metadata: {
+      ...authored.metadata,
+      annotations: {
+        ...annotations,
+        "arcturus.u128.org/compatibility-source": "v1",
+        "arcturus.u128.org/manifest-digest": digest,
+        "arcturus.u128.org/revision": revision,
+      },
+    },
+  });
+}
+
 function releaseToRoutingStack(release: ServiceRelease): Stack {
   const services: Record<string, Service> = {};
   for (const [name, route] of Object.entries(release.spec.routing)) {
@@ -306,6 +352,7 @@ function releaseToRoutingStack(release: ServiceRelease): Stack {
       namespace: "default",
       annotations: {
         "arcturus.u128.org/revision": release.metadata.revision,
+        "arcturus.u128.org/compatibility-source": "v2",
         ...(release.metadata.deploymentId
           ? { "arcturus.u128.org/deployment-id": release.metadata.deploymentId }
           : {}),

@@ -55,7 +55,7 @@ Ingress is operator-owned. TLS keys, ACME credentials, Cloudflare tokens, genera
 
 ## Legacy compatibility risk
 
-The deprecated `/deploy` endpoint, Terraform local provisioners, mutable host Git checkouts, Compose ownership, Watchtower, and broad runner socket access have a larger trust surface than the current release path. Keep them isolated during migration and remove them after no production workflow depends on them.
+The deprecated `/deploy` endpoint, Terraform local provisioners, mutable host Git checkouts, Compose ownership, Watchtower, and broad runner socket access have a larger trust surface than the current release path. The installer preserves old shared webhook authentication for compatibility, but immutable full-SHA applies are the default. Use `--allow-legacy-mutable-main` only as a time-bounded bridge for an unchanged 0.99.x workflow, then rerun the installer with `--disallow-legacy-mutable-main` after CI sends the exact commit. Keep the legacy path isolated and remove it after no production workflow depends on it.
 
 ## Release security checks
 

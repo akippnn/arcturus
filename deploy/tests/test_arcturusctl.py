@@ -119,6 +119,65 @@ class ProjectConfigurationTests(unittest.TestCase):
             self.assertEqual(web_image, rendered["spec"]["components"]["db-init"]["image"])
             self.assertEqual(rendered["spec"]["components"]["postgres"]["image"], f"docker.io/library/postgres@{FIXED_DIGEST}")
 
+
+    def test_owned_registry_maps_shared_build_to_isolated_component_repositories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = self.fixture(root)
+            value = project()
+            value["registry"] = {
+                "mode": "owned",
+                "host": "registry.tailnet.ts.net",
+                "origin": "https://registry.tailnet.ts.net",
+            }
+            value["builds"]["web"]["repository"] = "registry.tailnet.ts.net/multi-app/web"
+            value["builds"]["web"]["componentRepositories"] = {
+                "web": "registry.tailnet.ts.net/multi-app/web",
+                "db-init": "registry.tailnet.ts.net/multi-app/db-init",
+            }
+            release = manifest()
+            release["spec"]["components"]["web"]["image"] = (
+                "registry.tailnet.ts.net/multi-app/web@sha256:" + "0" * 64
+            )
+            release["spec"]["components"]["db-init"]["image"] = (
+                "registry.tailnet.ts.net/multi-app/db-init@sha256:" + "0" * 64
+            )
+            (root / "arcturus.release.json").write_text(json.dumps(release))
+            path.write_text(json.dumps(value))
+            definition, _, _ = load_project(path)
+            self.assertEqual(definition.registry.mode, "owned")
+            digest_path = root / "web.digest"
+            digest_path.write_text(DIGEST)
+            command_project_render(Namespace(
+                project=str(path), revision=REVISION, digest=[f"web={digest_path}"],
+                output=str(root / "release.json"), request_output=str(root / "request.json"),
+            ))
+            rendered = json.loads((root / "release.json").read_text())
+            self.assertEqual(
+                rendered["spec"]["components"]["db-init"]["image"],
+                f"registry.tailnet.ts.net/multi-app/db-init@{DIGEST}",
+            )
+
+    def test_v1_compatibility_requires_safe_host_feature(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.fixture(Path(temp_dir))
+            value = project()
+            value["compatibility"] = {
+                "manifestApis": ["arcturus.u128.org/v1", "arcturus.u128.org/v2"],
+                "v1Mode": "routing-mirror",
+                "v1Manifest": ".arcturus/compat-v1.json",
+            }
+            path.write_text(json.dumps(value))
+            with patch("arcturusctl.api_request", return_value={
+                "status": "ok", "version": "1.0.0-rc.2",
+                "features": ["authenticated-preflight", "legacy-compose-handoff"],
+            }):
+                with self.assertRaisesRegex(SystemExit, "manifest-v1-safe-routing-mirror"):
+                    command_project_preflight(Namespace(
+                        project=str(path), api_url=None, token_file=None, timeout=10,
+                        release=None, readiness_only=True,
+                    ))
+
     def test_rejects_obsolete_secret_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = self.fixture(Path(temp_dir))
@@ -152,7 +211,7 @@ class ProjectConfigurationTests(unittest.TestCase):
             responses = [
                 {
                     "status": "ok",
-                    "version": "1.0.0-rc.1",
+                    "version": "1.0.0-rc.2",
                     "features": ["authenticated-preflight", "legacy-compose-handoff"],
                 },
                 {"status": "ready"},

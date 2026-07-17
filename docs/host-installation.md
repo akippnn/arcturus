@@ -6,11 +6,11 @@ Arcturus installs into a dedicated rootless service account and uses user system
 
 The installer currently requires:
 
-- AlmaLinux or a compatible systemd/SELinux distribution
+- AlmaLinux 10.2 or AlmaLinux 9.8; compatible systemd/SELinux distributions may work when all feature probes pass
 - Python 3.12 or newer
 - Node.js 22 or newer
 - Podman 5.8 or newer
-- systemd 257 or newer
+- systemd 252 or newer
 - the Podman systemd/Quadlet generator
 - `bash`, `curl`, `sha256sum`, `getent`, and user systemd support
 
@@ -103,7 +103,7 @@ It creates the runtime socket directory, state directories, active-manifest dire
 
 The preferred GitHub-to-Arcturus path stores application images in a loopback Distribution registry and exposes it only through a dedicated Tailscale HTTPS Service.
 
-Use a supported Distribution v3 image and pin it by digest. The `v1.0.0-rc.1` source freeze uses v3.1.1 as the current stable reference, including the upstream fix for CVE-2026-41888. The installer cannot infer security support from an arbitrary digest, so review upstream advisories and verify the selected release before installation.
+Use a supported Distribution v3 image and pin it by digest. The `v1.0.0-rc.2` source freeze uses v3.1.1 as the current stable reference, including the upstream fix for CVE-2026-41888. The installer cannot infer security support from an arbitrary digest, so review upstream advisories and verify the selected release before installation.
 
 For a storage-only compatibility installation, provide only the digest-pinned Distribution image. The registry remains read-only:
 
@@ -183,3 +183,5 @@ Deploy a non-critical example, verify routing, and run the clean-host acceptance
 ## Upgrade behavior
 
 Re-running the installer with the same host user and a new digest-pinned bundle preserves the generated deployer and platform settings when their flags are omitted, including allowed bind roots, router domain, certificate domain, vhost directory, nginx container, already-active private deployer listeners, and the optional loopback OCI image, port, storage path, and authorization mode. The installer switches the `current` release atomically and restarts the running platform services so they execute the new release immediately.
+
+Existing Python-era `/deploy` clients may continue using an already-configured shared webhook secret while tokens are migrated. Immutable 40-character Git SHAs are required by default. When an old workflow cannot yet supply one, rerun the installer once with `--allow-legacy-mutable-main`; the choice is persisted across upgrades. This is an explicitly weaker bridge. After updating the Gitea or GitHub workflow to send the exact commit SHA, rerun with `--disallow-legacy-mutable-main`.

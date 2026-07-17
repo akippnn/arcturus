@@ -1,19 +1,24 @@
 {
-  "schemaVersion": 1,
-  "product": "arcturus",
-  "productVersion": "1.0.0-rc.1",
-  "manifestApis": [
-    "arcturus.u128.org/v1",
-    "arcturus.u128.org/v2"
-  ],
-  "features": [
-    "authenticated-preflight",
-    "legacy-compose-handoff",
-    "replayable-host-updates",
-    "oci-upload-grants",
-    "artifact-verification-and-receipts",
-    "receipt-enforced-owned-registry",
-    "tailscale-private-oci-ingress",
-    "bounded-artifact-verification"
-  ]
+    "schemaVersion": 1,
+    "product": "arcturus",
+    "productVersion": "1.0.0-rc.2",
+    "manifestApis": [
+        "arcturus.u128.org/v1",
+        "arcturus.u128.org/v2"
+    ],
+    "features": [
+        "authenticated-preflight",
+        "legacy-compose-handoff",
+        "replayable-host-updates",
+        "oci-upload-grants",
+        "artifact-verification-and-receipts",
+        "receipt-enforced-owned-registry",
+        "tailscale-private-oci-ingress",
+        "bounded-artifact-verification",
+        "manifest-v1-safe-routing-mirror",
+        "manifest-v1-provenance-routing",
+        "legacy-v1-service-scoped-deploy",
+        "gitea-and-github-ci-compatible",
+        "almalinux-9.8-and-10.2-hosts"
+    ]
 }

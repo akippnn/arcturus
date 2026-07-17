@@ -38,12 +38,23 @@ class ProjectBuild(BaseModel):
     validationTargets: list[str] = Field(default_factory=list)
     releaseTarget: str | None = None
     components: list[str]
+    componentRepositories: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("repository")
     @classmethod
     def validate_repository(cls, value: str) -> str:
         if not REPOSITORY_RE.fullmatch(value):
             raise ValueError("repository must be fully qualified and contain no tag")
+        return value
+
+    @field_validator("componentRepositories")
+    @classmethod
+    def validate_component_repositories(cls, value: dict[str, str]) -> dict[str, str]:
+        for component, repository in value.items():
+            if not NAME_RE.fullmatch(component):
+                raise ValueError(f"invalid component repository key: {component}")
+            if not REPOSITORY_RE.fullmatch(repository):
+                raise ValueError(f"invalid component repository for {component}")
         return value
 
     @field_validator("context", "containerfile")
@@ -63,6 +74,19 @@ class ProjectBuild(BaseModel):
         return value
 
 
+class ProjectTestIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["command", "container-target", "waived"] = "container-target"
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_waiver(self) -> "ProjectTestIntent":
+        if self.mode == "waived" and not (self.reason and self.reason.strip()):
+            raise ValueError("waived test intent requires a reason")
+        return self
+
+
 class ProjectCI(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -70,6 +94,7 @@ class ProjectCI(BaseModel):
     apiUrl: str
     storage: Literal["isolated", "shared"] = "isolated"
     deployTokenSecret: str = "ARCTURUS_DEPLOY_TOKEN"
+    testIntent: ProjectTestIntent = Field(default_factory=ProjectTestIntent)
 
     @field_validator("apiUrl")
     @classmethod
@@ -91,7 +116,9 @@ class ProjectCI(BaseModel):
 class ProjectRegistry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    mode: Literal["external", "owned"] = "external"
     host: str
+    origin: str | None = None
     userSecret: str = "REGISTRY_USER"
     tokenSecret: str = "REGISTRY_TOKEN"
 
@@ -102,6 +129,15 @@ class ProjectRegistry(BaseModel):
             raise ValueError("registry host is invalid")
         return value
 
+    @field_validator("origin")
+    @classmethod
+    def validate_origin(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not re.fullmatch(r"https://[a-z0-9][a-z0-9.-]*(?::[0-9]+)?", value):
+            raise ValueError("owned registry origin must be a lowercase HTTPS origin without a path")
+        return value.rstrip("/")
+
     @field_validator("userSecret", "tokenSecret")
     @classmethod
     def validate_secret_name(cls, value: str) -> str:
@@ -110,6 +146,52 @@ class ProjectRegistry(BaseModel):
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
             raise ValueError("registry secret name must be uppercase shell syntax")
         return value
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "ProjectRegistry":
+        if self.mode == "owned":
+            if not self.origin:
+                raise ValueError("owned registry mode requires origin")
+            origin_host = self.origin.removeprefix("https://")
+            if origin_host != self.host:
+                raise ValueError("owned registry origin hostname must match registry host")
+        return self
+
+
+class ProjectCompatibility(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    manifestApis: list[Literal["arcturus.u128.org/v1", "arcturus.u128.org/v2"]] = Field(
+        default_factory=lambda: ["arcturus.u128.org/v2"]
+    )
+    v1Mode: Literal["disabled", "routing-mirror"] = "disabled"
+    v1Manifest: str = ".arcturus/compat-v1.json"
+
+    @field_validator("manifestApis")
+    @classmethod
+    def validate_manifest_apis(cls, value: list[str]) -> list[str]:
+        if not value or len(value) != len(set(value)):
+            raise ValueError("manifestApis must be non-empty and contain no duplicates")
+        if "arcturus.u128.org/v2" not in value:
+            raise ValueError("manifest v2 must remain the authoritative deployment API")
+        return value
+
+    @field_validator("v1Manifest")
+    @classmethod
+    def validate_v1_manifest_path(cls, value: str) -> str:
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts or any(char in value for char in "\n\t\x00"):
+            raise ValueError("v1Manifest must be a safe repository-relative path")
+        return value
+
+    @model_validator(mode="after")
+    def validate_v1_mode(self) -> "ProjectCompatibility":
+        has_v1 = "arcturus.u128.org/v1" in self.manifestApis
+        if self.v1Mode == "routing-mirror" and not has_v1:
+            raise ValueError("routing-mirror mode requires manifest v1 in manifestApis")
+        if has_v1 and self.v1Mode != "routing-mirror":
+            raise ValueError("manifest v1 is supported only as a routing-mirror")
+        return self
 
 
 class ProjectVerification(BaseModel):
@@ -138,6 +220,7 @@ class ProjectDefinition(BaseModel):
     registry: ProjectRegistry
     builds: dict[str, ProjectBuild]
     fixedComponents: list[str] = Field(default_factory=list)
+    compatibility: ProjectCompatibility = Field(default_factory=ProjectCompatibility)
     verification: ProjectVerification = Field(default_factory=ProjectVerification)
 
     @field_validator("service")
@@ -174,6 +257,15 @@ def load_project(path: Path) -> tuple[ProjectDefinition, Path, ServiceRelease]:
     for build_name, build in project.builds.items():
         if not build.components:
             raise SystemExit(f"build {build_name} must map at least one component")
+        unknown_repository_mappings = set(build.componentRepositories) - set(build.components)
+        if unknown_repository_mappings:
+            raise SystemExit(
+                f"build {build_name} has repository mappings for unknown components: {sorted(unknown_repository_mappings)}"
+            )
+        if project.registry.mode == "owned" and set(build.componentRepositories) != set(build.components):
+            raise SystemExit(
+                f"owned registry build {build_name} requires a componentRepositories entry for every component"
+            )
         for component in build.components:
             if component in component_builds:
                 raise SystemExit(
@@ -183,10 +275,17 @@ def load_project(path: Path) -> tuple[ProjectDefinition, Path, ServiceRelease]:
             if component not in manifest.spec.components:
                 raise SystemExit(f"build {build_name} maps unknown component {component}")
             repository = manifest.spec.components[component].image.split("@", 1)[0]
-            if repository != build.repository:
+            expected_repository = build.componentRepositories.get(component, build.repository)
+            if repository != expected_repository:
                 raise SystemExit(
-                    f"component {component} repository {repository} does not match build {build_name}"
+                    f"component {component} repository {repository} does not match build {build_name} expected repository {expected_repository}"
                 )
+            if project.registry.mode == "owned":
+                owned_repository = f"{project.registry.host}/{project.service}/{component}"
+                if repository != owned_repository:
+                    raise SystemExit(
+                        f"owned registry component {component} must use repository {owned_repository}"
+                    )
     fixed = set(project.fixedComponents)
     unknown_fixed = fixed - set(manifest.spec.components)
     if unknown_fixed:
@@ -355,6 +454,7 @@ def command_project_plan(args: argparse.Namespace) -> None:
             ",".join(build.validationTargets) or "-",
             build.releaseTarget or "-",
             ",".join(build.components),
+            json.dumps(build.componentRepositories, sort_keys=True, separators=(",", ":")) or "{}",
         ]
         print("\t".join(fields))
 
@@ -376,9 +476,9 @@ def command_project_render(args: argparse.Namespace) -> None:
         digest = digest_paths[build_name].read_text().strip()
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise SystemExit(f"invalid registry digest for build {build_name}")
-        image = f"{build.repository}@{digest}"
         for component in build.components:
-            raw["spec"]["components"][component]["image"] = image
+            repository = build.componentRepositories.get(component, build.repository)
+            raw["spec"]["components"][component]["image"] = f"{repository}@{digest}"
     rendered = ServiceRelease.model_validate(raw)
     request = DeploymentRequest(
         service=project.service,
@@ -438,9 +538,23 @@ def command_project_deploy(args: argparse.Namespace) -> None:
 
 def command_project_preflight(args: argparse.Namespace) -> None:
     project, _, release = load_project(Path(args.project))
+    if getattr(args, "release", None):
+        release = ServiceRelease.model_validate_json(Path(args.release).read_text())
+        if release.metadata.name != project.service:
+            raise SystemExit("preflight release service does not match project")
     api_args = project_api_args(args, project)
     readiness = api_request(api_args, "GET", "/healthz", authenticated=False)
     required_features = {"authenticated-preflight", "legacy-compose-handoff"}
+    if project.registry.mode == "owned":
+        required_features.update(
+            {
+                "oci-upload-grants",
+                "artifact-verification-and-receipts",
+                "receipt-enforced-owned-registry",
+            }
+        )
+    if project.compatibility.v1Mode == "routing-mirror":
+        required_features.update({"manifest-v1-safe-routing-mirror", "manifest-v1-provenance-routing"})
     reported_features = set(readiness.get("features", [])) if isinstance(readiness, dict) else set()
     missing_features = sorted(required_features - reported_features)
     if missing_features:
@@ -450,6 +564,9 @@ def command_project_preflight(args: argparse.Namespace) -> None:
             f"(host version: {version}; missing features: {', '.join(missing_features)}). "
             "Upgrade the host to an Arcturus host with authenticated preflight support before deploying."
         )
+    if getattr(args, "readiness_only", False):
+        print(json.dumps({"status": "ok", "readiness": readiness}, indent=2, sort_keys=True))
+        return
     preflight = api_request(
         api_args,
         "POST",
@@ -768,6 +885,8 @@ def build_parser() -> argparse.ArgumentParser:
     project_deploy.set_defaults(func=command_project_deploy)
     project_preflight = project_subparsers.add_parser("preflight")
     project_preflight.add_argument("project")
+    project_preflight.add_argument("--release")
+    project_preflight.add_argument("--readiness-only", action="store_true")
     add_api_options(project_preflight)
     project_preflight.set_defaults(func=command_project_preflight)
     project_status = project_subparsers.add_parser("status")

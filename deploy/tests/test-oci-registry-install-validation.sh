@@ -51,7 +51,7 @@ fi
 STUB
 cat >"$stubs/systemd" <<'STUB'
 #!/usr/bin/env bash
-echo 'systemd 257 (fixture)'
+echo 'systemd 252 (fixture)'
 STUB
 cat >"$stubs/tailscale" <<'STUB'
 #!/usr/bin/env bash
@@ -188,6 +188,10 @@ grep -Fq 'REGISTRY_AUTH_TOKEN_SIGNINGALGORITHMS_0=EdDSA' \
 grep -Fq 'ARCTURUSD_UPLOAD_AUTH_ENABLED=true' \
   "$root/deploy/install-host.sh"
 grep -Fq 'ARCTURUS_OCI_RECEIPT_DB=' \
+  "$root/deploy/install-host.sh"
+grep -Fq 'ARCTURUS_LEGACY_ALLOW_MUTABLE_MAIN=' \
+  "$root/deploy/install-host.sh"
+grep -Fq -- '--allow-legacy-mutable-main' \
   "$root/deploy/install-host.sh"
 grep -Fq 'configure-oci-tailnet-ingress.sh' \
   "$root/deploy/install-host.sh"

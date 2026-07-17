@@ -58,12 +58,12 @@ jobs:
       - name: Require successful compilation
         if: steps.compile.outcome == 'failure'
         run: exit 1
-      - name: Commit compiled source
+      - name: Commit compiled product source
         shell: bash
         run: |
           set -euo pipefail
           rm -f rust/compiler.log
-          git add .github/workflows/security.yml CONTRIBUTING.md docs rust
+          git add docs rust
           git diff --cached --check
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com

@@ -2,6 +2,23 @@
 
 All notable public changes to Arcturus are documented here. The project follows semantic versioning for product releases; manifest API versions are tracked separately.
 
+## [Unreleased]
+
+### Added
+
+- Installer-managed Rust OCI authorization service with protected Ed25519 signing state, local JWKS verification, and bundle runtime smoke validation
+- Architecture-transition audit documenting retained compatibility and remaining Rust/OCI migration gates
+
+### Changed
+
+- GitHub is the default CI provider and sole documented hosted validation authority
+- Python/FastAPI and external private registries are explicitly classified as temporary compatibility paths
+- GitHub Actions setup dependencies are updated on top of the Rust security workflow
+
+### Removed
+
+- Duplicate Gitea workflows and Gitea runner registration examples
+
 ## [0.99.0-rc.2] - 2026-07-15
 
 ### Added

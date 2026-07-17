@@ -34,3 +34,5 @@ Arcturus documentation is organized around the current manifest-driven Quadlet a
 ## Documentation contract
 
 Public documentation must use example domains, users, paths, registries, and service names. Generated state, production inventory, credential material, private network details, and host-specific operational notes belong in a separate private operations repository.
+
+- [Architecture transition audit](architecture-transition-audit.md) — retained compatibility, removed Gitea defaults, and remaining migration gates.

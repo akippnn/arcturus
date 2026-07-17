@@ -66,7 +66,7 @@ class ProjectBuild(BaseModel):
 class ProjectCI(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["gitea", "github", "generic", "none"] = "gitea"
+    provider: Literal["gitea", "github", "generic", "none"] = "github"
     apiUrl: str
     storage: Literal["isolated", "shared"] = "isolated"
     deployTokenSecret: str = "ARCTURUS_DEPLOY_TOKEN"

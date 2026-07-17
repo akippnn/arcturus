@@ -40,7 +40,7 @@ Ship a safe, coherent public preview of the implemented platform without adding 
 - Public source contains only reusable code, generic examples, and public documentation.
 - Public history contains no private operations material or historical credentials.
 - README and architecture documentation lead with the manifest/Quadlet path.
-- GitHub and Gitea validation workflows cover tests, builds, audits, syntax, schemas, and secret scanning.
+- GitHub validation workflows cover tests, builds, audits, syntax, schemas, and secret scanning.
 - A clean clone reproduces all repository-local validation.
 - Only the intended branch and release tags are published.
 

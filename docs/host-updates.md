@@ -1,6 +1,6 @@
 # Updating an Arcturus host
 
-`deploy/arcturus-host-update` wraps the existing versioned installer. It persists only non-secret host installation arguments, installs itself into `~/.local/bin`, and replays those arguments against a new digest-pinned Arcturus bundle.
+`deploy/arcturus-host-update` is the current compatibility updater. It persists only non-secret host installation arguments, installs itself into `~/.local/bin`, and replays those arguments against a digest-pinned OCI bundle or a local release directory. The target stable updater will verify and install signed host bundles published by GitHub Releases; that bootstrap path is not yet implemented.
 
 The underlying `install-host.sh` behavior is unchanged: a release is staged under `~/.local/share/arcturus-deployer/releases/`, the `current` symlink is switched atomically, existing configuration is preserved unless explicitly replaced, user units are refreshed, and the services are restarted through user systemd.
 

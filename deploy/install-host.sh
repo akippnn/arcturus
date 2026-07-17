@@ -104,7 +104,9 @@ fi
 if [[ -n "$LISTEN_ADDRESS" ]] && ! "$PYTHON_BIN" - "$LISTEN_ADDRESS" <<'PY'
 import ipaddress, sys
 address = ipaddress.ip_address(sys.argv[1])
-raise SystemExit(0 if address.is_private or address.is_loopback else 1)
+tailscale_cgnat = ipaddress.ip_network("100.64.0.0/10")
+allowed = address.is_private or address.is_loopback or address in tailscale_cgnat
+raise SystemExit(0 if allowed else 1)
 PY
 then
   errors+=("--listen-address must be a private or loopback IP address")

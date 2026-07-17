@@ -124,3 +124,12 @@ Arcturus will not adopt Kubernetes solely to claim multi-host support.
 2. Complete clean-host acceptance and release v1.0.
 3. Add R2, Worker, and D1 support in independently testable slices.
 4. Reassess v2 priorities using actual operational evidence from v1/v1.1.
+
+## OCI ingress implementation sequence
+
+1. **Complete:** Rust contracts and isolated control-plane preview.
+2. **Complete:** Optional rootless, persistent, read-only OCI data plane on loopback.
+3. **In progress:** Rust service-token verification, persisted upload grants, Registry v2 token issuance, and JWKS.
+4. Configure the registry to trust the Rust issuer and enable writes only through authenticated Tailscale ingress.
+5. Verify manifests and layers, create immutable artifact receipts, and require receipts for deployment.
+6. Migrate service blueprints and CrownFi away from external registry credentials.

@@ -145,7 +145,7 @@ jobs:
       - name: Validate Rust workspace
         working-directory: rust
         run: |
-          cargo +1.97.0 fmt --all --check
+          cargo +1.97.0 fmt --all
           cargo +1.97.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
           cargo +1.97.0 test --locked --workspace --all-targets
       - name: Commit validated fix

@@ -146,7 +146,7 @@ class HardenedPodmanClient(BasePodmanClient):
             raise ValueError("pull_attempts must be at least 1")
         if retry_delay_seconds < 0:
             raise ValueError("retry_delay_seconds cannot be negative")
-        self.pull_attempts = pul_attempts
+        self.pull_attempts = pull_attempts
         self.retry_delay_seconds = retry_delay_seconds
         self.sleep = sleep
 
@@ -298,7 +298,7 @@ def check_image_policy(
                 "service": request.service,
                 "image": request.image,
                 "size_bytes": request.size_bytes,
-                "max_image_size_bytes": MAX_IMAGE_SIZE_BYTES
+                "max_image_size_bytes": MAX_IMAGE_SIZE_BYTES,
             },
         )
     return {
@@ -306,5 +306,5 @@ def check_image_policy(
         "service": request.service,
         "image": request.image,
         "size_bytes": request.size_bytes,
-        "max_image_size_bytes": MAX_IMAGE_SIZE_BYTES
+        "max_image_size_bytes": MAX_IMAGE_SIZE_BYTES,
     }

@@ -1,0 +1,161 @@
+name: Fix Rust upload-auth opt-in boundary
+
+on:
+  push:
+    branches:
+      - feat/rust-oci-upload-authorization
+    paths:
+      - '.github/workflows/fix-rust-auth-opt-in.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: feat/rust-oci-upload-authorization
+          fetch-depth: 0
+      - name: Restore health-only default
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          lib = Path('rust/bins/arcturusd/src/lib.rs')
+          text = lib.read_text()
+          old = '''pub fn app(state: AppState) -> Router {
+              Router::new()
+                  .route("/healthz", get(healthz))
+                  .route("/v1/rust/healthz", get(healthz))
+                  .route("/v1/artifact-uploads", post(create_artifact_upload))
+                  .route("/auth/token", get(registry_token))
+                  .route("/v1/oci/jwks.json", get(jwks))
+                  .with_state(Arc::new(state))
+                  .layer(TraceLayer::new_for_http())
+          }
+          '''
+          new = '''pub fn health_app() -> Router {
+              Router::new()
+                  .route("/healthz", get(healthz))
+                  .route("/v1/rust/healthz", get(healthz))
+                  .layer(TraceLayer::new_for_http())
+          }
+
+          pub fn app(state: AppState) -> Router {
+              Router::new()
+                  .route("/healthz", get(healthz))
+                  .route("/v1/rust/healthz", get(healthz))
+                  .route("/v1/artifact-uploads", post(create_artifact_upload))
+                  .route("/auth/token", get(registry_token))
+                  .route("/v1/oci/jwks.json", get(jwks))
+                  .with_state(Arc::new(state))
+                  .layer(TraceLayer::new_for_http())
+          }
+          '''
+          if old not in text:
+              raise SystemExit('app router source did not match expected text')
+          text = text.replace(old, new, 1)
+
+          marker = '''    #[tokio::test]
+              async fn grant_and_registry_token_flow_is_repository_scoped() {
+          '''
+          test = '''    #[tokio::test]
+              async fn health_only_app_requires_no_authorization_state() {
+                  let response = health_app()
+                      .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+                      .await
+                      .unwrap();
+                  assert_eq!(response.status(), StatusCode::OK);
+              }
+
+          '''
+          if marker not in text:
+              raise SystemExit('test insertion marker was not found')
+          text = text.replace(marker, test + marker, 1)
+          lib.write_text(text)
+
+          main = Path('rust/bins/arcturusd/src/main.rs')
+          text = main.read_text()
+          old = '''    let state = arcturusd::AppState::from_environment()?;
+              let address: SocketAddr = env::var("ARCTURUSD_LISTEN")
+                  .unwrap_or_else(|_| "127.0.0.1:9190".to_owned())
+                  .parse()?;
+              let listener = tokio::net::TcpListener::bind(address).await?;
+              info!(%address, "Arcturus Rust control-plane preview listening");
+
+              axum::serve(listener, arcturusd::app(state))
+          '''
+          new = '''    let upload_auth_enabled = match env::var("ARCTURUSD_UPLOAD_AUTH_ENABLED") {
+                  Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "1" | "true") => true,
+                  Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "0" | "false") => false,
+                  Ok(value) => {
+                      return Err(format!(
+                          "ARCTURUSD_UPLOAD_AUTH_ENABLED must be true, false, 1, or 0; got {value}"
+                      )
+                      .into());
+                  }
+                  Err(env::VarError::NotPresent) => false,
+                  Err(error) => return Err(error.into()),
+              };
+              let application = if upload_auth_enabled {
+                  arcturusd::app(arcturusd::AppState::from_environment()?)
+              } else {
+                  arcturusd::health_app()
+              };
+              let address: SocketAddr = env::var("ARCTURUSD_LISTEN")
+                  .unwrap_or_else(|_| "127.0.0.1:9190".to_owned())
+                  .parse()?;
+              let listener = tokio::net::TcpListener::bind(address).await?;
+              info!(%address, upload_auth_enabled, "Arcturus Rust control-plane preview listening");
+
+              axum::serve(listener, application)
+          '''
+          if old not in text:
+              raise SystemExit('main startup source did not match expected text')
+          main.write_text(text.replace(old, new, 1))
+
+          doc = Path('docs/oci-upload-authorization.md')
+          text = doc.read_text()
+          marker = '''The preview binary expects:
+
+          ```text
+          '''
+          replacement = '''The authorization routes are disabled by default. Enable them explicitly with:
+
+          ```text
+          ARCTURUSD_UPLOAD_AUTH_ENABLED=true
+          ```
+
+          When the flag is absent or false, `arcturusd` exposes only its health routes and does not read the signing key, control-token database, or grant database.
+
+          The enabled preview expects:
+
+          ```text
+          '''
+          if marker not in text:
+              raise SystemExit('documentation insertion marker was not found')
+          doc.write_text(text.replace(marker, replacement, 1))
+          PY
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt
+      - name: Validate Rust workspace
+        working-directory: rust
+        run: |
+          cargo +1.97.0 fmt --all --check
+          cargo +1.97.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo +1.97.0 test --locked --workspace --all-targets
+      - name: Commit validated fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add docs/oci-upload-authorization.md rust/bins/arcturusd/src/lib.rs rust/bins/arcturusd/src/main.rs
+          git diff --cached --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'fix: keep Rust upload authorization opt-in'
+          git push origin HEAD:feat/rust-oci-upload-authorization

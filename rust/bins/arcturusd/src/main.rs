@@ -12,13 +12,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .init();
 
+    let state = arcturusd::AppState::from_environment()?;
     let address: SocketAddr = env::var("ARCTURUSD_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9190".to_owned())
         .parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, "Arcturus Rust control-plane preview listening");
 
-    axum::serve(listener, arcturusd::app())
+    axum::serve(listener, arcturusd::app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())

@@ -57,6 +57,75 @@ test("rejects arbitrary container engine commands", () => {
   assert.throws(() => new NetworkManager("podman; id"), /Unsupported container engine/);
 });
 
+test("network reconciliation does not reconnect existing memberships", async () => {
+  const commands: string[][] = [];
+  const memberships: Record<string, Set<string>> = {
+    "portal-nginx": new Set(["arcturus-example-app"]),
+    "example-app-web": new Set(["arcturus-example-app", "internal_routing"]),
+  };
+  const manager = new NetworkManager("podman", "portal-nginx", (_command, args) => {
+    commands.push(args);
+    if (args[0] === "container" && args[1] === "inspect" && args[2] === "--format") {
+      const container = args[4];
+      return JSON.stringify(Object.fromEntries(
+        Array.from(memberships[container] || []).map(network => [network, {}]),
+      ));
+    }
+    return "{}";
+  });
+
+  await manager.ensureStackNetwork({
+    stackName: "example-app",
+    isolate: true,
+    external: ["internal_routing"],
+    primaryService: "web",
+    port: 8080,
+  });
+
+  assert.equal(commands.filter(args => args[0] === "network" && args[1] === "connect").length, 0);
+});
+
+test("network reconciliation connects missing memberships only once", async () => {
+  const commands: string[][] = [];
+  const memberships: Record<string, Set<string>> = {
+    "portal-nginx": new Set(),
+    "example-app-web": new Set(),
+  };
+  const manager = new NetworkManager("podman", "portal-nginx", (_command, args) => {
+    commands.push(args);
+    if (args[0] === "container" && args[1] === "inspect" && args[2] === "--format") {
+      const container = args[4];
+      return JSON.stringify(Object.fromEntries(
+        Array.from(memberships[container] || []).map(network => [network, {}]),
+      ));
+    }
+    if (args[0] === "network" && args[1] === "connect") {
+      const network = args[2];
+      const container = args[3];
+      memberships[container] ||= new Set();
+      memberships[container].add(network);
+    }
+    return "{}";
+  });
+
+  const config = {
+    stackName: "example-app",
+    isolate: true,
+    external: ["internal_routing"],
+    primaryService: "web",
+    port: 8080,
+  };
+  await manager.ensureStackNetwork(config);
+  await manager.ensureStackNetwork(config);
+
+  const connects = commands.filter(args => args[0] === "network" && args[1] === "connect");
+  assert.deepEqual(connects, [
+    ["network", "connect", "arcturus-example-app", "portal-nginx"],
+    ["network", "connect", "arcturus-example-app", "example-app-web"],
+    ["network", "connect", "internal_routing", "example-app-web"],
+  ]);
+});
+
 test("publishes a revision-matched routing receipt after nginx reload", async () => {
   const root = mkdtempSync(join(tmpdir(), "arcturus-router-"));
   const commands: string[][] = [];

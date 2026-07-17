@@ -6,6 +6,12 @@ Arcturus is a manifest-driven application platform for deploying immutable OCI r
 
 Arcturus deliberately targets the space between hand-maintained Compose deployments and a full container orchestrator. CI builds images and resolves their digests; Arcturus validates a release manifest, renders generated Quadlets, activates the release, verifies readiness, publishes routing state, and restores the previous healthy release when activation fails.
 
+## Current focus
+
+Arcturus is currently focused on making one Linux host behave like a small, auditable application platform: reproducible control-plane updates, immutable application releases, explicit ownership handoff, fail-closed routing, deterministic rollback, and diagnostics that another operator can reproduce from the same commit or bundle digest.
+
+The v1.0 goal is not to imitate every Kubernetes feature. It is to establish a dependable single-host control plane with clear contracts and ordinary Linux failure modes that can be inspected through files, systemd, journald, Podman, HTTP health, and machine-readable receipts. Multi-host scheduling and failover belong after those contracts are stable.
+
 ## What it provides
 
 - Digest-pinned, multi-component releases
@@ -21,6 +27,7 @@ Arcturus deliberately targets the space between hand-maintained Compose deployme
 - Authenticated preflight before expensive application builds
 - Transactional Compose-to-Quadlet ownership handoff
 - Replayable, recorded host and project update workflows
+- A copy-and-paste host validation and issue-reporting playbook
 
 Arcturus does **not** build images on the production host, deploy floating tags, let Watchtower replace releases, or require Terraform/Compose for normal application updates.
 
@@ -79,7 +86,7 @@ sudo -iu appsvc arcturus-host-update apply \
 
 Remote deployment listeners should use a private address and a source-scoped firewall rule; loopback is the default.
 
-Full instructions: [Host installation](docs/host-installation.md) and [Host updates](docs/host-updates.md).
+Full instructions: [Host installation](docs/host-installation.md), [Host updates](docs/host-updates.md), and [Host validation and issue reporting](docs/host-validation.md).
 
 ### 2. Bootstrap an application repository
 
@@ -146,6 +153,7 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 - [Manifest reference](docs/manifest-reference.md)
 - [Host installation](docs/host-installation.md)
 - [Host updates](docs/host-updates.md)
+- [Host validation and issue reporting](docs/host-validation.md)
 - [Operations](docs/operations.md)
 - [Security model](docs/security.md)
 - [Migration from Compose/Terraform](docs/migration.md)

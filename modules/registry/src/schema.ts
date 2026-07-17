@@ -116,6 +116,25 @@ const ReleaseComponentSchema = z.object({
   }
 });
 
+const LegacyComposeTakeoverSchema = z.object({
+  project: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/),
+  required: z.boolean().default(false),
+  cleanup: z.enum(["retain", "remove"]).default("retain"),
+}).strict();
+
+const MigrationPolicySchema = z.object({
+  legacyCompose: z.array(LegacyComposeTakeoverSchema).default([]),
+}).strict().superRefine((migration, context) => {
+  const projects = migration.legacyCompose.map(item => item.project);
+  if (new Set(projects).size !== projects.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["legacyCompose"],
+      message: "legacy Compose projects must be unique",
+    });
+  }
+});
+
 export const ServiceReleaseSchema = z.object({
   apiVersion: z.literal("arcturus.u128.org/v2"),
   kind: z.literal("ServiceRelease"),
@@ -143,6 +162,7 @@ export const ServiceReleaseSchema = z.object({
       timeoutSeconds: z.number().int().min(10).max(1800).default(300),
       rollbackOnFailure: z.boolean().default(true),
     }).strict().default({ timeoutSeconds: 300, rollbackOnFailure: true }),
+    migration: MigrationPolicySchema.optional(),
   }).strict(),
 }).strict();
 

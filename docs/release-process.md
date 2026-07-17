@@ -46,7 +46,7 @@ Run the test suite from the clean external clone. Confirm the archive contains o
 
 ## 5. Hosted CI
 
-Require GitHub/Gitea CI to pass from the candidate commit. Do not treat a locally passing workflow as proof that hosted permissions, package availability, and expression syntax are correct.
+Require GitHub CI to pass from the candidate commit. Do not treat a locally passing workflow as proof that hosted permissions, package availability, and expression syntax are correct.
 
 ## 6. Tag and publish
 

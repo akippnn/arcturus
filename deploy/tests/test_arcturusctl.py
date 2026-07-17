@@ -53,7 +53,7 @@ def project() -> dict:
         "service": "multi-app",
         "manifest": "arcturus.release.json",
         "ci": {
-            "provider": "gitea",
+            "provider": "github",
             "apiUrl": "http://192.0.2.10:9090",
             "storage": "isolated",
         },
@@ -90,6 +90,16 @@ class ProjectConfigurationTests(unittest.TestCase):
             definition, _, release = load_project(self.fixture(Path(temp_dir)))
             self.assertEqual(definition.builds["web"].components, ["web", "db-init"])
             self.assertEqual(release.spec.components["postgres"].image.split("@", 1)[1], FIXED_DIGEST)
+
+    def test_github_is_the_default_ci_provider(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = self.fixture(root)
+            value = project()
+            value["ci"].pop("provider")
+            path.write_text(json.dumps(value))
+            definition, _, _ = load_project(path)
+            self.assertEqual(definition.ci.provider, "github")
 
     def test_render_reuses_one_digest_for_shared_components(self):
         with tempfile.TemporaryDirectory() as temp_dir:

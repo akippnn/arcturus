@@ -65,7 +65,7 @@ Before publication or release:
 - inspect the exact `git archive` output
 - confirm no environment files, credentials, runtime databases, logs, generated vhosts, certificates, private inventory, or runner state are tracked
 - run application tests and dependency audits
-- verify GitHub/Gitea workflows from a clean clone
+- verify GitHub workflows from a clean clone
 - push only intended branches and tags
 
 See [Release process](release-process.md) and [SECURITY.md](../SECURITY.md).

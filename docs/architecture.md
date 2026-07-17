@@ -28,17 +28,18 @@ Arcturus is a single-host application platform. It separates image construction,
 
 ## Release flow
 
-1. CI validates application code and every configured image validation target.
-2. CI builds release targets and pushes full-commit tags to the registry.
-3. CI resolves each pushed image to `repository@sha256:digest`.
-4. CI renders a concrete `ServiceRelease` and submits it with the matching 40-character Git revision.
-5. The deployment API authenticates a token scoped to the requested service and acquires the per-service lock.
-6. The release engine validates schema and references, checks host bind roots and required secrets, pre-pulls images, and verifies their digests.
-7. Quadlet and systemd units are rendered into an immutable release directory and checked with the Podman systemd generator.
-8. The active Quadlet symlink is switched atomically, systemd reloads, and the service target is activated.
-9. Required service units, one-shots, timers, and Podman health checks must reach their accepted state before the release is marked active.
-10. The active manifest is published. The registry/router updates ingress and records a revision/deployment-matched routing receipt.
-11. If activation or readiness fails, Arcturus restores the previous Quadlet selection and validates the previous release. Failure and rollback are recorded separately.
+### Target Arcturus-owned artifact flow
+
+1. GitHub Actions validates application code and every configured image target.
+2. CI requests a short-lived upload grant scoped to one service, revision, and exact component repositories.
+3. CI pushes OCI manifests and blobs directly to the private Arcturus endpoint over Tailscale.
+4. Arcturus independently verifies manifests, descriptors, sizes, digests, and ownership, then records immutable artifact receipts.
+5. A deployment may reference only receipts accepted for the same service, component, and Git revision.
+6. The lifecycle service renders Quadlet and systemd units, activates them, verifies readiness, publishes routing state, and restores the previous healthy release on failure.
+
+### Current compatibility flow
+
+Until artifact completion and receipt enforcement are implemented, existing projects may still push images to an external registry and submit digest-pinned references. The Python/FastAPI lifecycle service pre-pulls and verifies those images before activation. This compatibility path is retained for live deployments and recovery; it is not the architecture for new integrations.
 
 ## Workload modes
 
@@ -89,5 +90,5 @@ Destructive storage operations must be separate and explicit.
 - The deployment API is powerful and must remain on loopback or a private network with source restrictions.
 - The rootless Podman API socket is dedicated to Arcturus control-plane services and must not be exposed to untrusted jobs.
 - Application manifests can request commands and host bind mounts, so repository write access is equivalent to deployment authority for that service.
-- Ingress, registry, DNS, backup, and host administration remain separate operational trust domains.
+- Public ingress, DNS, backup, and host administration remain separate operational trust domains; application OCI storage is moving under Arcturus ownership.
 - Legacy `/deploy`, Terraform provisioners, and runner socket access carry broader authority and should be removed after migration.

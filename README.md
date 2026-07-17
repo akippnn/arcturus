@@ -2,7 +2,7 @@
 
 Arcturus is a manifest-driven application platform for deploying immutable OCI releases to a single AlmaLinux host with rootless Podman, Quadlet, and user systemd.
 
-> **Status:** `v0.99.0-rc.2`. RC2 adds authenticated deployment preflight, transactional handoff from legacy Compose ownership, and replayable host/project updates. The remaining v1.0 work is clean-host acceptance, resource-limit support, and freezing the public manifest contract.
+> **Status:** post-`v0.99.0-rc.2` development. The active deployment lifecycle still runs through the tested Python/FastAPI compatibility service while Rust assumes OCI upload authorization in reversible slices. The Arcturus-owned OCI data plane is host-local, authenticated, loopback-only, read-only, and not yet the public CI upload path.
 
 Arcturus deliberately targets the space between hand-maintained Compose deployments and a full container orchestrator. CI builds images and resolves their digests; Arcturus validates a release manifest, renders generated Quadlets, activates the release, verifies readiness, publishes routing state, and restores the previous healthy release when activation fails.
 
@@ -34,20 +34,17 @@ Arcturus does **not** build images on the production host, deploy floating tags,
 ## Architecture
 
 ```text
-application repository
+GitHub repository + GitHub Actions
         |
-        | authenticated preflight + tests + Buildah build + registry push
+        | current compatibility: build + external digest reference
+        | target: short-lived grant + direct OCI upload over Tailscale
         v
-immutable image digests + ServiceRelease manifest
+Arcturus control plane
+  Rust OCI authorization -> accepted artifact receipt (next slice)
+  Python/FastAPI lifecycle compatibility -> validate -> activate -> rollback
         |
-        | authenticated deployment request
         v
-Arcturus deployer
-  preflight -> validate -> pre-pull -> render -> handoff -> activate
-        |                                                   |
-        |                                                   +-> rollback on failure
-        v
-rootless Podman Quadlets + user systemd
+Arcturus-owned OCI storage + rootless Podman Quadlets + user systemd
         |
         +-> active manifest -> registry -> router -> operator-owned ingress
 ```
@@ -56,7 +53,7 @@ See [Architecture](docs/architecture.md) for component and trust-boundary detail
 
 ## Quick start
 
-### 1. Prepare a supported host
+### 1. Prepare a supported host (current compatibility updater)
 
 The current installer validates Python 3.12+, Node.js 22+, Podman 5.8+, systemd 257+, and the Podman Quadlet generator.
 
@@ -115,7 +112,7 @@ arcturusctl token create \
   --output "$HOME/.config/arcturus/my-api-ci.token"
 ```
 
-Copy only the output file's value into the project's protected `ARCTURUS_DEPLOY_TOKEN` CI secret. CI also needs registry push credentials. The generated workflow authenticates and checks host capabilities, token scope, Podman secrets, and external volumes/networks before building images. It then builds validation targets, publishes immutable images, resolves digests, renders the release, deploys it, and verifies the active state.
+Copy only the output file's value into the project's protected `ARCTURUS_DEPLOY_TOKEN` CI secret. Existing blueprints still need registry push credentials while using the external-registry compatibility path. The target flow instead exchanges the service-scoped Arcturus token for a short-lived repository-scoped upload grant and pushes directly to the Arcturus OCI endpoint. Artifact receipts and deployment receipt enforcement must land before that target path replaces compatibility deployment.
 
 The blueprint records its setup intent so future migrations can be applied by dropping in a newer blueprint and running `./scripts/arcturus-update apply`.
 
@@ -136,14 +133,14 @@ Tokens are read from `ARCTURUS_TOKEN_FILE` or `ARCTURUS_DEPLOY_TOKEN`; they are 
 
 | Path | Purpose |
 | --- | --- |
-| `deploy/` | FastAPI deployment service, release engine, installer, host updater, CLI, tests, and OCI bundle build |
+| `deploy/` | Transitional Python/FastAPI lifecycle service, host installer/updater, CLI, tests, and bundle build |
 | `modules/bus/` | Unix-socket event bus |
 | `modules/registry/` | Active-manifest discovery and validation |
 | `modules/router/` | Safe nginx vhost generation and routing receipts |
 | `schemas/` | CUE schema covering legacy and current manifest APIs |
 | `portal/` | Optional operator-owned ingress compatibility example; not the application release engine |
 | `terraform-modules/` | Deprecated/compatibility host and Compose-era modules |
-| `runners/` | Conservative CI-runner guidance; no registration credentials or generated state |
+| `runners/` | GitHub Actions runner guidance; no registration credentials or generated state |
 | `docs/` | Architecture, manifest, operations, security, migration, updates, roadmap, and release documentation |
 
 ## Documentation
@@ -176,7 +173,7 @@ Product v1.0 will stabilize the existing manifest API v2. See the [roadmap](docs
 
 ## Security
 
-Keep the deployment API on loopback or a private network, use one service-scoped token per CI identity, use separate pull-only and push-capable registry credentials, and provision application secrets directly on the host. Report vulnerabilities using [SECURITY.md](SECURITY.md).
+Keep the deployment API on loopback or a private network, use one service-scoped token per CI identity, and provision application secrets directly on the host. While compatibility deployment remains enabled, keep host pull-only credentials separate from CI push credentials; the target Arcturus OCI flow replaces the CI push credential with short-lived scoped grants. Report vulnerabilities using [SECURITY.md](SECURITY.md).
 
 ## License
 

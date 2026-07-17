@@ -42,7 +42,7 @@ sudo -iu appsvc /path/to/install-host.sh \
   --allowed-bind-root /home/appsvc/apps
 ```
 
-Authenticate the service account to the registry with a pull-only credential before installation. The bundle contains the deployer, CLI, compiled bus/registry/router modules, Python wheels, and user units.
+The current OCI-bundle compatibility updater requires the service account to authenticate to the bundle registry with a pull-only credential before installation. The bundle contains the deployer, CLI, compiled bus/registry/router modules, the statically linked Rust `arcturusd` binary, Python wheels, and user units. Signed GitHub Release host bundles remain a later bootstrap slice.
 
 ### Local source directory
 
@@ -94,6 +94,7 @@ The installer provides user units for:
 - the active-manifest registry
 - the router
 - an optional loopback-only OCI artifact data plane
+- an optional Rust OCI authorization service
 
 It creates the runtime socket directory, state directories, active-manifest directory, Quadlet directory, and the external routing network when absent. It enables user lingering so services can start without an interactive session.
 
@@ -112,7 +113,31 @@ Enable it with a digest-pinned Distribution image:
 
 Storage defaults to `~/.local/share/arcturus-registry`. The installer preserves a protected registry HTTP secret, keeps the registry read-only, disables manifest deletion, and verifies `http://127.0.0.1:9443/v2/` before completing.
 
-This phase creates no public or tailnet listener and no CI registry credential. See [Arcturus OCI ingress](oci-ingress.md) for the boundary and staged rollout.
+### Optional local token authorization
+
+Install the Rust authorization service and configure Distribution to verify its Ed25519-signed registry tokens:
+
+```bash
+./deploy/install-host.sh [existing options] \
+  --oci-registry-image 'registry.example.org/distribution/distribution@sha256:<digest>' \
+  --oci-registry-port 9443 \
+  --enable-oci-auth
+```
+
+This explicit opt-in:
+
+- starts `arcturusd` only on `127.0.0.1:9190`;
+- creates a protected Ed25519 seed at `~/.config/arcturus/oci-signing.seed`;
+- writes grants and the public JWKS beneath the dedicated mode-0700 `~/.local/share/arcturus-oci-auth` state directory and mounts only the JWKS read-only into Distribution;
+- configures the registry token issuer, audience, realm, JWKS verifier, and an EdDSA-only verification allowlist;
+- preserves the signing key, JWKS, and grant database across disable/re-enable cycles;
+- keeps registry storage read-only and manifest deletion disabled.
+
+With authorization enabled, an anonymous request to `/v2/` must return HTTP `401` with a Bearer challenge for service `arcturus-oci`; anonymous HTTP `200` is no longer the readiness condition. Disable only the token layer with `--disable-oci-auth`, or remove the local data-plane unit with `--disable-oci-registry`.
+
+A local-source installation using `--enable-oci-auth` also requires a compiled executable at `deploy/arcturusd`. Production bundles build this binary automatically with the pinned Rust toolchain.
+
+This phase still creates no public or tailnet listener and no CI registry credential. See [Arcturus OCI ingress](oci-ingress.md) for the boundary and staged rollout.
 
 ## Configuration preservation
 
@@ -127,9 +152,12 @@ systemctl --user status arcturus-podman-api.service
 systemctl --user status 'arcturus-deployer@*'
 systemctl --user status arcturus-bus.service arcturus-registry.service arcturus-router.service
 systemctl --user status arcturus-oci-registry.service  # when configured
+systemctl --user status arcturusd.service  # when OCI authorization is enabled
 podman network exists internal_routing
 curl --fail http://127.0.0.1:9090/healthz
-curl --fail http://127.0.0.1:9443/v2/  # when configured
+curl --fail http://127.0.0.1:9443/v2/  # registry without token authorization
+curl --silent --output /dev/null --write-out '%{http_code}\n' \
+  http://127.0.0.1:9443/v2/  # expect 401 when token authorization is enabled
 ```
 
 Then create a service-scoped token on the host:
@@ -152,4 +180,4 @@ Deploy a non-critical example, verify routing, and run the clean-host acceptance
 
 ## Upgrade behavior
 
-Re-running the installer with the same host user and a new digest-pinned bundle preserves the generated deployer and platform settings when their flags are omitted, including allowed bind roots, router domain, certificate domain, vhost directory, nginx container, already-active private deployer listeners, and the optional loopback OCI image, port, and storage path. The installer switches the `current` release atomically and restarts the running platform services so they execute the new release immediately.
+Re-running the installer with the same host user and a new digest-pinned bundle preserves the generated deployer and platform settings when their flags are omitted, including allowed bind roots, router domain, certificate domain, vhost directory, nginx container, already-active private deployer listeners, and the optional loopback OCI image, port, storage path, and authorization mode. The installer switches the `current` release atomically and restarts the running platform services so they execute the new release immediately.

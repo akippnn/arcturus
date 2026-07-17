@@ -1,3 +1,13 @@
+FROM rust:1.97.0-alpine3.24 AS rust-build
+
+ENV CARGO_NET_RETRY=5 \
+    CARGO_HTTP_TIMEOUT=120
+
+RUN apk add --no-cache build-base
+WORKDIR /build/rust
+COPY rust ./
+RUN cargo build --locked --release -p arcturusd
+
 FROM node:22-alpine AS platform-build
 
 ENV NPM_CONFIG_FETCH_RETRIES=2 \
@@ -30,7 +40,9 @@ RUN mkdir -p wheelhouse \
 COPY deploy/app.py deploy/image_policy_app.py deploy/release.py deploy/arcturusctl.py deploy/arcturusctl deploy/install-host.sh \
      deploy/arcturus-host-update deploy/render-oci-registry-quadlet.sh \
      deploy/arcturus-deployer@.service deploy/arcturus-podman-api.service \
-     deploy/arcturus-bus.service deploy/arcturus-registry.service deploy/arcturus-router.service ./
+     deploy/arcturus-bus.service deploy/arcturus-registry.service deploy/arcturus-router.service \
+     deploy/arcturusd.service ./
+COPY --from=rust-build /build/rust/target/release/arcturusd /opt/arcturus/deploy/arcturusd
 COPY --from=platform-build /build/modules/bus/dist /opt/arcturus/modules/bus/dist
 COPY --from=platform-build /build/modules/bus/package.json /opt/arcturus/modules/bus/package.json
 COPY --from=platform-build /build/modules/router/dist /opt/arcturus/modules/router/dist
@@ -39,7 +51,7 @@ COPY --from=platform-build /build/modules/registry/dist /opt/arcturus/modules/re
 COPY --from=platform-build /build/modules/registry/package.json /opt/arcturus/modules/registry/package.json
 COPY --from=platform-build /build/modules/registry/node_modules/zod /opt/arcturus/modules/registry/node_modules/zod
 RUN chmod 0755 arcturusctl.py arcturusctl install-host.sh arcturus-host-update \
-    render-oci-registry-quadlet.sh
+    render-oci-registry-quadlet.sh arcturusd
 
 FROM base AS test
 COPY deploy/tests ./tests
@@ -50,10 +62,27 @@ RUN bash -n install-host.sh arcturus-host-update arcturusctl build-bundle.sh \
     && ./tests/test-host-update.sh \
     && ./tests/test-oci-registry-quadlet.sh \
     && ./tests/test-oci-registry-install-validation.sh \
+    && test -x arcturusd \
     && python3.12 -m py_compile app.py image_policy_app.py release.py arcturusctl.py \
     && CERT_DOMAIN=example.org python3.12 -m unittest discover -s tests -v \
     && python3.12 -m pip install pip-audit \
     && python3.12 -m pip_audit --requirement requirements.txt
+RUN set -eux; \
+    ./arcturusd >/tmp/arcturusd.log 2>&1 & \
+    arcturusd_pid=$!; \
+    trap 'kill "$arcturusd_pid" >/dev/null 2>&1 || true; wait "$arcturusd_pid" 2>/dev/null || true; cat /tmp/arcturusd.log' EXIT; \
+    ready=false; \
+    attempt=0; \
+    while [ "$attempt" -lt 30 ]; do \
+      if python3.12 -c 'import json, urllib.request; response = urllib.request.urlopen("http://127.0.0.1:9190/healthz", timeout=2); payload = json.load(response); assert response.status == 200 and payload.get("status") == "ok" and payload.get("service") == "arcturusd"'; then \
+        ready=true; \
+        break; \
+      fi; \
+      attempt=$((attempt + 1)); \
+      sleep 0.2; \
+    done; \
+    [ "$ready" = true ]
+
 
 FROM base AS runtime
 ENTRYPOINT ["python3.12", "/opt/arcturus/deploy/arcturusctl.py"]

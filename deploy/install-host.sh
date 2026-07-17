@@ -22,6 +22,8 @@ Usage: install-host.sh [options]
   --oci-registry-image IMAGE  Digest-pinned Distribution image; enables loopback OCI storage
   --oci-registry-port PORT    Loopback OCI port (default: 9443)
   --oci-registry-storage DIR  Persistent OCI storage (default: ~/.local/share/arcturus-registry)
+  --enable-oci-auth           Install Rust auth and configure registry token verification
+  --disable-oci-auth          Keep local registry but disable Rust token authorization
   --disable-oci-registry      Disable and remove the local OCI data-plane unit
   --configure-firewall        Add a source-scoped firewalld rule for port 9090
   --validate-only             Validate inputs and prerequisites without writing
@@ -47,6 +49,8 @@ OCI_REGISTRY_IMAGE=""
 OCI_REGISTRY_PORT="9443"
 OCI_REGISTRY_PORT_SET=false
 OCI_REGISTRY_STORAGE=""
+OCI_AUTH_SET=false
+OCI_AUTH_ENABLED=false
 DISABLE_OCI_REGISTRY=false
 CONFIGURE_FIREWALL=false
 VALIDATE_ONLY=false
@@ -73,6 +77,8 @@ while (($#)); do
     --oci-registry-image) OCI_REGISTRY_IMAGE="$2"; shift 2 ;;
     --oci-registry-port) OCI_REGISTRY_PORT="$2"; OCI_REGISTRY_PORT_SET=true; shift 2 ;;
     --oci-registry-storage) OCI_REGISTRY_STORAGE="$2"; shift 2 ;;
+    --enable-oci-auth) OCI_AUTH_SET=true; OCI_AUTH_ENABLED=true; shift ;;
+    --disable-oci-auth) OCI_AUTH_SET=true; OCI_AUTH_ENABLED=false; shift ;;
     --disable-oci-registry) DISABLE_OCI_REGISTRY=true; shift ;;
     --configure-firewall) CONFIGURE_FIREWALL=true; shift ;;
     --validate-only) VALIDATE_ONLY=true; shift ;;
@@ -144,7 +150,7 @@ fi
 if [[ -n "$SOURCE_DIR" ]]; then
   for file in app.py image_policy_app.py release.py arcturusctl.py arcturus-deployer@.service \
     arcturus-podman-api.service arcturus-bus.service arcturus-registry.service \
-    arcturus-router.service render-oci-registry-quadlet.sh; do
+    arcturus-router.service arcturusd.service render-oci-registry-quadlet.sh; do
     [[ -f "$SOURCE_DIR/$file" ]] || errors+=("source artifact is missing: $SOURCE_DIR/$file")
   done
   source_root_check="$(cd "$SOURCE_DIR/.." 2>/dev/null && pwd || true)"
@@ -204,6 +210,17 @@ if ! $DISABLE_OCI_REGISTRY; then
     [[ -z "$existing_oci_port" ]] || OCI_REGISTRY_PORT="$existing_oci_port"
   fi
   [[ -n "$OCI_REGISTRY_STORAGE" ]] || OCI_REGISTRY_STORAGE="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_REGISTRY_STORAGE)"
+  if ! $OCI_AUTH_SET; then
+    existing_oci_auth="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_AUTH_ENABLED)"
+    case "$existing_oci_auth" in
+      true) OCI_AUTH_ENABLED=true ;;
+      false|"") OCI_AUTH_ENABLED=false ;;
+      *)
+        echo "Existing ARCTURUS_OCI_AUTH_ENABLED must be true or false" >&2
+        exit 2
+        ;;
+    esac
+  fi
 fi
 
 if [[ -z "$VHOSTS_DIR" ]]; then
@@ -237,11 +254,17 @@ fi
 if [[ -n "$OCI_REGISTRY_STORAGE" && ! "$OCI_REGISTRY_STORAGE" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
   oci_errors+=("--oci-registry-storage must be an absolute path without whitespace")
 fi
-if $DISABLE_OCI_REGISTRY && { [[ -n "$OCI_REGISTRY_IMAGE" ]] || $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]]; }; then
+if $DISABLE_OCI_REGISTRY && { [[ -n "$OCI_REGISTRY_IMAGE" ]] || $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]] || $OCI_AUTH_SET; }; then
   oci_errors+=("--disable-oci-registry cannot be combined with OCI registry configuration options")
 fi
-if [[ -z "$OCI_REGISTRY_IMAGE" ]] && ! $DISABLE_OCI_REGISTRY && { $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]]; }; then
-  oci_errors+=("OCI registry port or storage requires --oci-registry-image or an existing OCI configuration")
+if [[ -z "$OCI_REGISTRY_IMAGE" ]] && ! $DISABLE_OCI_REGISTRY && { $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]] || $OCI_AUTH_ENABLED; }; then
+  oci_errors+=("OCI registry port, storage, or authorization requires --oci-registry-image or an existing OCI configuration")
+fi
+if $OCI_AUTH_ENABLED && [[ "$OCI_REGISTRY_PORT" == 9190 ]]; then
+  oci_errors+=("--oci-registry-port must not conflict with the Rust authorization port 9190")
+fi
+if $OCI_AUTH_ENABLED && [[ -n "$SOURCE_DIR" && ! -x "$SOURCE_DIR/arcturusd" ]]; then
+  oci_errors+=("--enable-oci-auth requires a compiled executable at $SOURCE_DIR/arcturusd")
 fi
 if ((${#oci_errors[@]})); then
   printf 'Arcturus OCI registry validation failed\n' >&2
@@ -260,6 +283,12 @@ PLATFORM_CONFIG_FILE="$CONFIG_DIR/platform.env"
 OCI_CONFIG_FILE="$CONFIG_DIR/oci-registry.env"
 OCI_RUNTIME_ENV_FILE="$CONFIG_DIR/oci-registry-runtime.env"
 OCI_QUADLET_FILE="$QUADLET_DIR/arcturus-oci-registry.container"
+ARCTURUSD_CONFIG_FILE="$CONFIG_DIR/arcturusd.env"
+ARCTURUSD_UNIT_FILE="$UNIT_DIR/arcturusd.service"
+OCI_SIGNING_KEY_FILE="$CONFIG_DIR/oci-signing.seed"
+OCI_AUTH_STATE_DIR="$HOST_HOME/.local/share/arcturus-oci-auth"
+OCI_JWKS_FILE="$OCI_AUTH_STATE_DIR/jwks.json"
+OCI_AUTH_DB="$OCI_AUTH_STATE_DIR/grants.sqlite3"
 
 if [[ -z "$VERSION" && -n "$SOURCE_DIR" ]]; then
   VERSION="local-$(find "$SOURCE_DIR" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)"
@@ -279,6 +308,7 @@ Arcturus host configuration
   network:           $NETWORK
   router:            ${BASE_DOMAIN:-disabled}${BASE_DOMAIN:+ via $NGINX_CONTAINER}
   OCI data plane:    ${OCI_REGISTRY_IMAGE:-disabled}${OCI_REGISTRY_IMAGE:+ on 127.0.0.1:$OCI_REGISTRY_PORT}
+  OCI authorization: $([[ "$OCI_AUTH_ENABLED" == true ]] && echo enabled || echo disabled)
   OCI storage:       ${OCI_REGISTRY_STORAGE:-not configured}
   state:             $STATE_DIR
   allowed bind roots: $(IFS=,; echo "${ALLOWED_BIND_ROOTS[*]}")
@@ -307,12 +337,15 @@ trap cleanup EXIT
 if [[ -n "$SOURCE_DIR" ]]; then
   for file in app.py image_policy_app.py release.py arcturusctl.py requirements.txt \
     arcturus-deployer@.service arcturus-podman-api.service arcturus-bus.service \
-    arcturus-registry.service arcturus-router.service arcturusctl \
+    arcturus-registry.service arcturus-router.service arcturusd.service arcturusctl \
     render-oci-registry-quadlet.sh; do
     install -m 0644 "$SOURCE_DIR/$file" "$staging/$file"
   done
   chmod 0755 "$staging/arcturusctl" "$staging/arcturusctl.py" \
     "$staging/render-oci-registry-quadlet.sh"
+  if [[ -x "$SOURCE_DIR/arcturusd" ]]; then
+    install -m 0755 "$SOURCE_DIR/arcturusd" "$staging/arcturusd"
+  fi
   if [[ -d "$SOURCE_DIR/wheelhouse" ]]; then
     cp -a "$SOURCE_DIR/wheelhouse" "$staging/wheelhouse"
   fi
@@ -413,11 +446,49 @@ ARCTURUS_OCI_REGISTRY_IMAGE=$OCI_REGISTRY_IMAGE
 ARCTURUS_OCI_REGISTRY_PORT=$OCI_REGISTRY_PORT
 ARCTURUS_OCI_REGISTRY_STORAGE=$OCI_REGISTRY_STORAGE
 ARCTURUS_OCI_REGISTRY_URL=http://127.0.0.1:$OCI_REGISTRY_PORT
+ARCTURUS_OCI_AUTH_ENABLED=$OCI_AUTH_ENABLED
 EOF
   install -m 0600 "$rendered_oci" "$OCI_CONFIG_FILE"
   rm -f "$rendered_oci"
   oci_http_secret="$(read_existing_value "$OCI_RUNTIME_ENV_FILE" REGISTRY_HTTP_SECRET)"
   [[ -n "$oci_http_secret" ]] || oci_http_secret="$($PYTHON_BIN -c 'import secrets; print(secrets.token_urlsafe(48))')"
+  if $OCI_AUTH_ENABLED; then
+    mkdir -p "$OCI_AUTH_STATE_DIR"
+    chmod 0700 "$OCI_AUTH_STATE_DIR"
+    [[ -x "$release_path/arcturusd" ]] || {
+      echo "Installed release is missing the arcturusd binary required for OCI authorization" >&2
+      exit 2
+    }
+    if [[ ! -f "$OCI_SIGNING_KEY_FILE" ]]; then
+      "$PYTHON_BIN" - "$OCI_SIGNING_KEY_FILE" <<'PY'
+import base64, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+tmp = path.with_suffix(path.suffix + '.new')
+tmp.write_text(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip('=') + '\n', encoding='utf-8')
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+    fi
+    chmod 0600 "$OCI_SIGNING_KEY_FILE"
+    rendered_arcturusd="$(mktemp)"
+    cat >"$rendered_arcturusd" <<EOF
+ARCTURUSD_LISTEN=127.0.0.1:9190
+ARCTURUSD_UPLOAD_AUTH_ENABLED=true
+ARCTURUSD_STATE_DB=$OCI_AUTH_DB
+RUNNER_TOKENS_FILE=$CONFIG_DIR/tokens.json
+ARCTURUS_OCI_SIGNING_KEY=$OCI_SIGNING_KEY_FILE
+ARCTURUS_OCI_JWKS_FILE=$OCI_JWKS_FILE
+ARCTURUS_OCI_REGISTRY=127.0.0.1:$OCI_REGISTRY_PORT
+ARCTURUS_OCI_TOKEN_ISSUER=arcturusd
+ARCTURUS_OCI_TOKEN_SERVICE=arcturus-oci
+ARCTURUS_OCI_UPLOAD_TTL_SECONDS=600
+EOF
+    install -m 0600 "$rendered_arcturusd" "$ARCTURUSD_CONFIG_FILE"
+    rm -f "$rendered_arcturusd"
+  else
+    rm -f "$ARCTURUSD_CONFIG_FILE"
+  fi
+
   rendered_oci_runtime="$(mktemp)"
   cat >"$rendered_oci_runtime" <<EOF
 REGISTRY_HTTP_ADDR=0.0.0.0:5000
@@ -431,17 +502,28 @@ REGISTRY_STORAGE_MAINTENANCE_UPLOADPURGING_INTERVAL=24h
 REGISTRY_STORAGE_MAINTENANCE_UPLOADPURGING_DRYRUN=false
 REGISTRY_STORAGE_MAINTENANCE_READONLY_ENABLED=true
 EOF
+  if $OCI_AUTH_ENABLED; then
+    cat >>"$rendered_oci_runtime" <<EOF
+REGISTRY_AUTH=token
+REGISTRY_AUTH_TOKEN_REALM=http://127.0.0.1:9190/auth/token
+REGISTRY_AUTH_TOKEN_SERVICE=arcturus-oci
+REGISTRY_AUTH_TOKEN_ISSUER=arcturusd
+REGISTRY_AUTH_TOKEN_JWKS=/etc/distribution/oci-jwks.json
+REGISTRY_AUTH_TOKEN_SIGNINGALGORITHMS_0=EdDSA
+EOF
+  fi
   install -m 0600 "$rendered_oci_runtime" "$OCI_RUNTIME_ENV_FILE"
   rm -f "$rendered_oci_runtime"
   oci_quadlet_stage="$(mktemp -d)"
   "$release_path/render-oci-registry-quadlet.sh" \
     "$OCI_REGISTRY_IMAGE" "$OCI_REGISTRY_PORT" "$OCI_REGISTRY_STORAGE" \
-    "$OCI_RUNTIME_ENV_FILE" >"$oci_quadlet_stage/arcturus-oci-registry.container"
+    "$OCI_RUNTIME_ENV_FILE" "$([[ "$OCI_AUTH_ENABLED" == true ]] && printf '%s' "$OCI_JWKS_FILE")" \
+    >"$oci_quadlet_stage/arcturus-oci-registry.container"
   QUADLET_UNIT_DIRS="$oci_quadlet_stage" "$QUADLET_GENERATOR" --user --dryrun >/dev/null
   install -m 0644 "$oci_quadlet_stage/arcturus-oci-registry.container" "$OCI_QUADLET_FILE"
   rm -rf "$oci_quadlet_stage"
 else
-  rm -f "$OCI_CONFIG_FILE" "$OCI_RUNTIME_ENV_FILE"
+  rm -f "$OCI_CONFIG_FILE" "$OCI_RUNTIME_ENV_FILE" "$ARCTURUSD_CONFIG_FILE"
 fi
 
 install -m 0644 "$release_path/arcturus-deployer@.service" "$UNIT_DIR/arcturus-deployer@.service"
@@ -449,6 +531,7 @@ install -m 0644 "$release_path/arcturus-podman-api.service" "$UNIT_DIR/arcturus-
 install -m 0644 "$release_path/arcturus-bus.service" "$UNIT_DIR/arcturus-bus.service"
 install -m 0644 "$release_path/arcturus-registry.service" "$UNIT_DIR/arcturus-registry.service"
 install -m 0644 "$release_path/arcturus-router.service" "$UNIT_DIR/arcturus-router.service"
+install -m 0644 "$release_path/arcturusd.service" "$ARCTURUSD_UNIT_FILE"
 mkdir -p "$UNIT_DIR/arcturus-router.service.d"
 router_paths="$(mktemp)"
 cat >"$router_paths" <<EOF
@@ -493,10 +576,40 @@ systemctl --user restart arcturus-podman-api.service
 systemctl --user enable arcturus-bus.service arcturus-registry.service
 systemctl --user restart arcturus-bus.service arcturus-registry.service
 if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
+  if $OCI_AUTH_ENABLED; then
+    systemctl --user enable arcturusd.service
+    systemctl --user restart arcturusd.service
+    auth_ready=false
+    for _ in {1..30}; do
+      if curl --fail --silent "http://127.0.0.1:9190/healthz" >/dev/null 2>&1 \
+        && [[ -s "$OCI_JWKS_FILE" ]]; then
+        auth_ready=true
+        break
+      fi
+      sleep 1
+    done
+    $auth_ready || {
+      systemctl --user status arcturusd.service --no-pager -l >&2 || true
+      echo "Arcturus Rust OCI authorization did not become ready" >&2
+      exit 1
+    }
+  else
+    systemctl --user disable --now arcturusd.service >/dev/null 2>&1 || true
+  fi
   systemctl --user restart arcturus-oci-registry.service
   registry_ready=false
   for _ in {1..30}; do
-    if curl --fail --silent "http://127.0.0.1:$OCI_REGISTRY_PORT/v2/" >/dev/null 2>&1; then
+    if $OCI_AUTH_ENABLED; then
+      registry_headers="$(mktemp)"
+      registry_status="$(curl --silent --output /dev/null --dump-header "$registry_headers" \
+        --write-out '%{http_code}' "http://127.0.0.1:$OCI_REGISTRY_PORT/v2/" || true)"
+      if [[ "$registry_status" == 401 ]] \
+        && grep -Eqi '^Www-Authenticate: Bearer .*service="?arcturus-oci"?' "$registry_headers"; then
+        registry_ready=true
+      fi
+      rm -f "$registry_headers"
+      $registry_ready && break
+    elif curl --fail --silent "http://127.0.0.1:$OCI_REGISTRY_PORT/v2/" >/dev/null 2>&1; then
       registry_ready=true
       break
     fi
@@ -509,6 +622,7 @@ if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
   }
 else
   systemctl --user stop arcturus-oci-registry.service >/dev/null 2>&1 || true
+  systemctl --user disable --now arcturusd.service >/dev/null 2>&1 || true
   rm -f "$OCI_QUADLET_FILE"
   systemctl --user daemon-reload
 fi
@@ -535,6 +649,10 @@ fi
 echo "Arcturus $VERSION installed for $HOST_USER."
 echo "API readiness: curl --fail http://127.0.0.1:9090/healthz"
 if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
-  echo "OCI readiness: curl --fail http://127.0.0.1:$OCI_REGISTRY_PORT/v2/"
+  if $OCI_AUTH_ENABLED; then
+    echo "OCI readiness: expect HTTP 401 and a Bearer challenge from http://127.0.0.1:$OCI_REGISTRY_PORT/v2/"
+  else
+    echo "OCI readiness: curl --fail http://127.0.0.1:$OCI_REGISTRY_PORT/v2/"
+  fi
 fi
 echo "Create a CI token with: arcturusctl token create --database '$CONFIG_DIR/tokens.json' --service <service> --token-id <service>-ci --output '$CONFIG_DIR/<service>-ci.token'"

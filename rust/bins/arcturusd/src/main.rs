@@ -12,14 +12,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .init();
 
-    let state = arcturusd::AppState::from_environment()?;
+    let upload_auth_enabled = match env::var("ARCTURUSD_UPLOAD_AUTH_ENABLED") {
+        Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "1" | "true") => true,
+        Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "0" | "false") => false,
+        Ok(value) => {
+            return Err(format!(
+                "ARCTURUSD_UPLOAD_AUTH_ENABLED must be true, false, 1, or 0; got {value}"
+            )
+            .into());
+        }
+        Err(env::VarError::NotPresent) => false,
+        Err(error) => return Err(error.into()),
+    };
+    let application = if upload_auth_enabled {
+        arcturusd::app(arcturusd::AppState::from_environment()?)
+    } else {
+        arcturusd::health_app()
+    };
     let address: SocketAddr = env::var("ARCTURUSD_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9190".to_owned())
         .parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    info!(%address, "Arcturus Rust control-plane preview listening");
+    info!(%address, upload_auth_enabled, "Arcturus Rust control-plane preview listening");
 
-    axum::serve(listener, arcturusd::app(state))
+    axum::serve(listener, application)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())

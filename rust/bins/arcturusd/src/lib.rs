@@ -150,6 +150,13 @@ async fn registry_token(
     Ok(no_store_json(StatusCode::OK, response))
 }
 
+pub fn health_app() -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/v1/rust/healthz", get(healthz))
+        .layer(TraceLayer::new_for_http())
+}
+
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -417,6 +424,20 @@ mod tests {
                 .features
                 .contains(&"registry-token-issuer-preview".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn health_only_app_requires_no_authorization_state() {
+        let response = health_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

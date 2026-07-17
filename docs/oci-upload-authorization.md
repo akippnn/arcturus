@@ -70,7 +70,15 @@ The OCI token protocol authorizes repositories and actions, not individual tags.
 
 ## Key and state files
 
-The preview binary expects:
+The authorization routes are disabled by default. Enable them explicitly with:
+
+```text
+ARCTURUSD_UPLOAD_AUTH_ENABLED=true
+```
+
+When the flag is absent or false, `arcturusd` exposes only its health routes and does not read the signing key, control-token database, or grant database.
+
+The enabled preview expects:
 
 ```text
 ARCTURUSD_STATE_DB

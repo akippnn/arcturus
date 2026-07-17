@@ -14,6 +14,10 @@ Arcturus documentation is organized around the current manifest-driven Quadlet a
 8. [Private registry authentication](private-registry-auth.md) — transitional host-owned pull credentials, preflight, rotation, and pull-failure behavior.
 9. [Migration](migration.md) — moving production ownership away from Compose, Terraform provisioners, and Watchtower.
 
+## Architecture decisions
+
+- [ADR 0001: Arcturus-owned OCI ingress and Rust control plane](adr/0001-arcturus-owned-oci-ingress-and-rust-control-plane.md)
+
 ## Project direction
 
 - [Roadmap](ROADMAP.md)

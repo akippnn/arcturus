@@ -56,6 +56,23 @@ jobs:
           python -m compileall -q deploy
           python -W error::ResourceWarning -m unittest discover -s deploy/tests -v
 
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt
+      - name: Check formatting
+        run: cargo +1.97.0 fmt --all --check
+      - name: Lint Rust workspace
+        run: cargo +1.97.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Test Rust workspace
+        run: cargo +1.97.0 test --locked --workspace --all-targets
+
   node:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -129,6 +146,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f rust/Cargo.lock
           for module in bus registry router; do
             python -m json.tool "modules/$module/package.json" >/dev/null
             python -m json.tool "modules/$module/package-lock.json" >/dev/null

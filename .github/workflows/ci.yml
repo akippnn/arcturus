@@ -66,20 +66,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt
-      - name: Generate dependency lock
-        run: cargo +1.97.0 generate-lockfile
       - name: Check formatting
         run: cargo +1.97.0 fmt --all --check
       - name: Lint Rust workspace
-        run: cargo +1.97.0 clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo +1.97.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Test Rust workspace
-        run: cargo +1.97.0 test --workspace --all-targets
-      - name: Emit generated lockfile for initial bootstrap
-        if: always()
-        run: |
-          echo '---BEGIN ARCTURUS CARGO LOCK---'
-          cat Cargo.lock
-          echo '---END ARCTURUS CARGO LOCK---'
+        run: cargo +1.97.0 test --locked --workspace --all-targets
 
   node:
     runs-on: ubuntu-latest
@@ -154,6 +146,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f rust/Cargo.lock
           for module in bus registry router; do
             python -m json.tool "modules/$module/package.json" >/dev/null
             python -m json.tool "modules/$module/package-lock.json" >/dev/null

@@ -5,6 +5,8 @@ import { execFileSync } from "node:child_process";
 const STACK_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const RUNTIME_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
+type NetworkCommandRunner = (command: string, args: string[]) => string | void;
+
 export interface NetworkConfig {
   stackName: string;
   isolate: boolean;
@@ -17,14 +19,20 @@ export interface NetworkConfig {
 export class NetworkManager {
   private engine: string;
   private portalContainer: string;
+  private commandRunner?: NetworkCommandRunner;
 
-  constructor(engine = "podman", portalContainer = "portal-nginx") {
+  constructor(
+    engine = "podman",
+    portalContainer = "portal-nginx",
+    commandRunner?: NetworkCommandRunner,
+  ) {
     if (engine !== "docker" && engine !== "podman") {
       throw new Error(`Unsupported container engine: ${engine}`);
     }
     this.engine = engine;
     this.assertRuntimeName(portalContainer, "portal container");
     this.portalContainer = portalContainer;
+    this.commandRunner = commandRunner;
   }
 
   /** Ensure a stack has its isolated network and portal can reach it */
@@ -42,29 +50,24 @@ export class NetworkManager {
     }
 
     if (!config.isolate) {
-      // Non-isolated stacks just stay on internal_routing
       return;
     }
 
     const networkName = `arcturus-${config.stackName}`;
 
-    // 1. Create dedicated bridge network if it doesn't exist
     if (!this.networkExists(networkName)) {
       this.createNetwork(networkName);
     }
 
-    // 2. Connect portal-nginx to this network so it can route
     if (this.containerExists(this.portalContainer)) {
       this.connectContainer(this.portalContainer, networkName);
     }
 
-    // 3. Connect the stack's primary service container
     const containerName = config.containerName || `${config.stackName}-${config.primaryService}`;
     if (this.containerExists(containerName)) {
       this.connectContainer(containerName, networkName);
     }
 
-    // 4. Connect external networks if specified
     for (const extNet of config.external || []) {
       if (this.containerExists(containerName)) {
         this.connectContainer(containerName, extNet);
@@ -77,20 +80,29 @@ export class NetworkManager {
     this.assertStackName(stackName);
     const networkName = `arcturus-${stackName}`;
 
-    // Disconnect portal-nginx
     if (this.containerExists(this.portalContainer)) {
       this.disconnectContainer(this.portalContainer, networkName);
     }
 
-    // Remove network
     if (this.networkExists(networkName)) {
       this.removeNetwork(networkName);
     }
   }
 
+  private run(args: string[]): string {
+    if (this.commandRunner) {
+      return this.commandRunner(this.engine, args) || "";
+    }
+    return execFileSync(this.engine, args, {
+      encoding: "utf-8",
+      timeout: 10000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+
   private networkExists(name: string): boolean {
     try {
-      execFileSync(this.engine, ["network", "inspect", name], { stdio: "ignore" });
+      this.run(["network", "inspect", name]);
       return true;
     } catch {
       return false;
@@ -99,67 +111,87 @@ export class NetworkManager {
 
   private createNetwork(name: string): void {
     try {
-      execFileSync(this.engine, ["network", "create", "--driver", "bridge", name], {
-        encoding: "utf-8",
-        timeout: 10000,
-      });
+      this.run(["network", "create", "--driver", "bridge", name]);
       console.log(`[Network] Created ${name}`);
-    } catch (err) {
-      console.error(`[Network] Failed to create ${name}:`, (err as Error).message);
+    } catch (error) {
+      throw new Error(`Failed to create network ${name}: ${this.errorMessage(error)}`);
     }
   }
 
   private removeNetwork(name: string): void {
     try {
-      execFileSync(this.engine, ["network", "rm", name], {
-        encoding: "utf-8",
-        timeout: 10000,
-      });
+      this.run(["network", "rm", name]);
       console.log(`[Network] Removed ${name}`);
-    } catch (err) {
-      console.error(`[Network] Failed to remove ${name}:`, (err as Error).message);
+    } catch (error) {
+      throw new Error(`Failed to remove network ${name}: ${this.errorMessage(error)}`);
     }
   }
 
   private containerExists(name: string): boolean {
     try {
-      execFileSync(this.engine, ["container", "inspect", name], { stdio: "ignore" });
+      this.run(["container", "inspect", name]);
       return true;
     } catch {
       return false;
     }
   }
 
-  private connectContainer(container: string, network: string): void {
+  private containerConnectedToNetwork(container: string, network: string): boolean {
     try {
-      execFileSync(this.engine, ["network", "connect", network, container], {
-        encoding: "utf-8",
-        timeout: 10000,
-      });
+      const raw = this.run([
+        "container",
+        "inspect",
+        "--format",
+        "{{json .NetworkSettings.Networks}}",
+        container,
+      ]).trim();
+      const networks = JSON.parse(raw || "{}") as Record<string, unknown>;
+      return Object.prototype.hasOwnProperty.call(networks, network);
+    } catch {
+      return false;
+    }
+  }
+
+  private connectContainer(container: string, network: string): void {
+    if (this.containerConnectedToNetwork(container, network)) {
+      return;
+    }
+
+    try {
+      this.run(["network", "connect", network, container]);
       console.log(`[Network] Connected ${container} to ${network}`);
-    } catch (err) {
-      // May already be connected
-      const msg = (err as Error).message;
-      if (!msg.includes("already exists") && !msg.includes("already connected")) {
-        console.error(`[Network] Failed to connect ${container} to ${network}:`, msg);
+    } catch (error) {
+      const message = this.errorMessage(error);
+      if (message.includes("already exists") || message.includes("already connected")) {
+        return;
       }
+      throw new Error(`Failed to connect ${container} to ${network}: ${message}`);
     }
   }
 
   private disconnectContainer(container: string, network: string): void {
-    try {
-      execFileSync(this.engine, ["network", "disconnect", network, container], {
-        encoding: "utf-8",
-        timeout: 10000,
-      });
-      console.log(`[Network] Disconnected ${container} from ${network}`);
-    } catch (err) {
-      // May not be connected
-      const msg = (err as Error).message;
-      if (!msg.includes("not connected")) {
-        console.error(`[Network] Failed to disconnect ${container} from ${network}:`, msg);
-      }
+    if (!this.containerConnectedToNetwork(container, network)) {
+      return;
     }
+
+    try {
+      this.run(["network", "disconnect", network, container]);
+      console.log(`[Network] Disconnected ${container} from ${network}`);
+    } catch (error) {
+      const message = this.errorMessage(error);
+      if (message.includes("not connected") || message.includes("no such network")) {
+        return;
+      }
+      throw new Error(`Failed to disconnect ${container} from ${network}: ${message}`);
+    }
+  }
+
+  private errorMessage(error: unknown): string {
+    const failure = error as Error & { stderr?: string | Buffer };
+    const stderr = typeof failure.stderr === "string"
+      ? failure.stderr
+      : failure.stderr?.toString("utf-8");
+    return (stderr || failure.message || String(error)).trim().slice(0, 512);
   }
 
   private assertStackName(name: string): void {

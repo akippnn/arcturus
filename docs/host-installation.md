@@ -12,7 +12,7 @@ The installer currently requires:
 - Podman 5.8 or newer
 - systemd 257 or newer
 - the Podman systemd/Quadlet generator
-- `bash`, `sha256sum`, `getent`, and user systemd support
+- `bash`, `curl`, `sha256sum`, `getent`, and user systemd support
 
 Run the actual installer validation on the target host; package availability differs across distribution point releases.
 
@@ -93,8 +93,26 @@ The installer provides user units for:
 - the event bus
 - the active-manifest registry
 - the router
+- an optional loopback-only OCI artifact data plane
 
 It creates the runtime socket directory, state directories, active-manifest directory, Quadlet directory, and the external routing network when absent. It enables user lingering so services can start without an interactive session.
+
+
+## Optional local OCI data plane
+
+The target GitHub-to-Arcturus artifact flow uses an Arcturus-owned OCI registry rather than Gitea. The current host slice installs storage on loopback only; remote upload authorization is added separately.
+
+Enable it with a digest-pinned Distribution image:
+
+```bash
+./deploy/install-host.sh [existing options] \
+  --oci-registry-image 'registry.example.org/distribution/distribution@sha256:<digest>' \
+  --oci-registry-port 9443
+```
+
+Storage defaults to `~/.local/share/arcturus-registry`. The installer preserves a protected registry HTTP secret, keeps the registry read-only, disables manifest deletion, and verifies `http://127.0.0.1:9443/v2/` before completing.
+
+This phase creates no public or tailnet listener and no CI registry credential. See [Arcturus OCI ingress](oci-ingress.md) for the boundary and staged rollout.
 
 ## Configuration preservation
 
@@ -108,8 +126,10 @@ Use systemd drop-ins under `~/.config/systemd/user/<unit>.d/` for host-specific 
 systemctl --user status arcturus-podman-api.service
 systemctl --user status 'arcturus-deployer@*'
 systemctl --user status arcturus-bus.service arcturus-registry.service arcturus-router.service
+systemctl --user status arcturus-oci-registry.service  # when configured
 podman network exists internal_routing
 curl --fail http://127.0.0.1:9090/healthz
+curl --fail http://127.0.0.1:9443/v2/  # when configured
 ```
 
 Then create a service-scoped token on the host:
@@ -132,4 +152,4 @@ Deploy a non-critical example, verify routing, and run the clean-host acceptance
 
 ## Upgrade behavior
 
-Re-running the installer with the same host user and a new digest-pinned bundle preserves the generated deployer and platform settings when their flags are omitted, including allowed bind roots, router domain, certificate domain, vhost directory, nginx container, and already-active private deployer listeners. The installer switches the `current` release atomically and restarts the running platform services so they execute the new release immediately.
+Re-running the installer with the same host user and a new digest-pinned bundle preserves the generated deployer and platform settings when their flags are omitted, including allowed bind roots, router domain, certificate domain, vhost directory, nginx container, already-active private deployer listeners, and the optional loopback OCI image, port, and storage path. The installer switches the `current` release atomically and restarts the running platform services so they execute the new release immediately.

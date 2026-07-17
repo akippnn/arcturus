@@ -10,7 +10,8 @@ Arcturus documentation is organized around the current manifest-driven Quadlet a
 4. [Manifest reference](manifest-reference.md) — the `arcturus.u128.org/v2` release contract.
 5. [Operations](operations.md) — status, verification, logs, rollback, disable/enable, and removal.
 6. [Security model](security.md) — authentication, secret boundaries, host exposure, and release integrity.
-7. [Migration](migration.md) — moving production ownership away from Compose, Terraform provisioners, and Watchtower.
+7. [Private registry authentication](private-registry-auth.md) — host-owned pull credentials, preflight, rotation, and pull-failure behavior.
+8. [Migration](migration.md) — moving production ownership away from Compose, Terraform provisioners, and Watchtower.
 
 ## Project direction
 

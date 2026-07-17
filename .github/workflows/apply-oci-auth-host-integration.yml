@@ -1,0 +1,53 @@
+name: Apply OCI auth host integration
+
+on:
+  pull_request:
+    paths:
+      - '.arcturus/oci-auth-host-integration.patch.gz.b64'
+      - '.github/workflows/apply-oci-auth-host-integration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - name: Apply reviewed host-integration patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .arcturus/oci-auth-host-integration.patch.gz.b64 \
+            | gzip --decompress > "$RUNNER_TEMP/oci-auth-host-integration.patch"
+          git apply --check "$RUNNER_TEMP/oci-auth-host-integration.patch"
+          git apply "$RUNNER_TEMP/oci-auth-host-integration.patch"
+      - name: Validate host scripts and fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/tests/test-host-update.sh
+          ./deploy/tests/test-oci-registry-quadlet.sh
+          ./deploy/tests/test-oci-registry-install-validation.sh
+          bash -n deploy/install-host.sh deploy/arcturus-host-update \
+            deploy/render-oci-registry-quadlet.sh \
+            deploy/tests/test-host-update.sh \
+            deploy/tests/test-oci-registry-quadlet.sh \
+            deploy/tests/test-oci-registry-install-validation.sh
+      - name: Build and test complete host bundle
+        run: docker build --target test --file deploy/Containerfile.bundle .
+      - name: Commit validated product changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add deploy docs/host-installation.md
+          git diff --cached --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'feat: integrate Rust OCI authorization on hosts'
+          git push origin "HEAD:${GITHUB_HEAD_REF}"

@@ -11,14 +11,14 @@ Arcturus documentation is organized around the current manifest-driven Quadlet a
 5. [Manifest reference](manifest-reference.md) — the `arcturus.u128.org/v2` release contract.
 6. [Operations](operations.md) — status, verification, logs, rollback, disable/enable, and removal.
 7. [Security model](security.md) — authentication, secret boundaries, host exposure, and release integrity.
-8. [Arcturus OCI ingress](oci-ingress.md) — local artifact data plane, safety boundary, installation, and staged remote-ingress plan.
+8. [Arcturus OCI ingress](oci-ingress.md) — private Tailscale HTTPS ingress, fail-closed writable storage, CI publishing, and acceptance boundary.
 9. [Private registry authentication](private-registry-auth.md) — transitional host-owned pull credentials, preflight, rotation, and pull-failure behavior.
 10. [Migration](migration.md) — moving production ownership away from Compose, Terraform provisioners, and Watchtower.
 
 ## Architecture decisions
 
 - [ADR 0001: Arcturus-owned OCI ingress and Rust control plane](adr/0001-arcturus-owned-oci-ingress-and-rust-control-plane.md)
-- [OCI upload grants and token authorization](oci-upload-authorization.md) — Rust preview contracts, credentials, JWT claims, and current non-production boundary.
+- [OCI upload grants, verification, and receipts](oci-upload-authorization.md) — scoped credentials, Registry JWTs, server-side blob verification, immutable receipts, and deployment enforcement.
 
 ## Project direction
 

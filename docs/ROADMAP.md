@@ -6,12 +6,13 @@ Arcturus is a practical single-host application platform. It is not intended to 
 
 Product versions and manifest APIs are independent:
 
-- Current product candidate: `v0.99.0-rc.1`
-- Stable product target: `v1.0.0`
+- Current product candidate: `v1.0.0-rc.1`
+- Stable release target: `v1.0.0`
+- Operational status: acceptance pending; not yet declared stable
 - Current release API: `arcturus.u128.org/v2`
 - Legacy stack/routing API: `arcturus.u128.org/v1`
 
-Product v1.0 will stabilize the current v2 manifest API.
+Product v1.0 preserves and stabilizes the current v2 manifest API.
 
 ## Current state
 
@@ -25,9 +26,9 @@ The main release path already supports:
 - active-manifest publication and router receipts
 - project generation and CI integration through the service blueprint
 
-The existing deployment engine is feature-complete for a v0.99 preview. Before the stable release, artifact transport is being consolidated into an Arcturus-owned OCI ingress and the control-plane API is beginning a gradual Rust migration. External private registries and Python/FastAPI remain supported as explicit compatibility paths during that transition.
+The `v1.0.0-rc.1` source candidate contains the tested manifest-v2 lifecycle plus Arcturus-owned OCI upload grants, private Tailscale ingress, independent artifact verification, immutable receipts, and owned-registry deployment enforcement. External private registries and Python/FastAPI remain explicit compatibility paths while the Service Blueprint/CrownFi migration and real-host acceptance matrix are completed.
 
-The transition is delivered in independently reversible slices: Rust contracts and health, loopback OCI storage, scoped upload authorization, artifact receipts, deployment enforcement, remote Tailscale ingress, and finally lifecycle migration from Python.
+The control-plane language migration remains incremental. Rust owns artifact ingress; Python continues to own activation, rollback, and recovery until parity is proven.
 
 # v0.99 — Public release candidate
 
@@ -58,9 +59,10 @@ Freeze the current release contract and prove the platform on clean supported Al
 - stable compatibility/deprecation policy for the legacy API
 - cleanup of test/runtime warnings
 - complete clean-host acceptance documentation
-- Arcturus-owned OCI upload grants, artifact receipts, and retention pins
-- a TLS-protected Tailscale OCI endpoint with no permanent application registry token
-- Rust ownership of the stable control-plane API while retaining tested compatibility rollback
+- migrate the Service Blueprint and CrownFi CI to the receipt-producing publisher
+- release-aware artifact pins, retention policy, and reviewed garbage collection
+- live acceptance of the TLS-protected Tailscale OCI endpoint and failure-injection matrix
+- incremental Rust control-plane ownership while retaining tested Python activation and rollback until parity is proven
 
 Quadlet `.build` is excluded: production images are built in CI. Quadlet `.pod` remains optional until a real namespace-sharing requirement appears.
 
@@ -120,16 +122,19 @@ Arcturus will not adopt Kubernetes solely to claim multi-host support.
 
 ## Delivery order
 
-1. Publish and operate v0.99.
-2. Complete clean-host acceptance and release v1.0.
-3. Add R2, Worker, and D1 support in independently testable slices.
-4. Reassess v2 priorities using actual operational evidence from v1/v1.1.
+1. Freeze and validate the `v1.0.0-rc.1` source candidate.
+2. Migrate the Service Blueprint and CrownFi CI, then complete clean-host/live-upgrade/failure-matrix acceptance.
+3. Add release-aware retention and reviewed garbage collection.
+4. Publish the operationally accepted v1.0 release artifacts.
+5. Add R2, Worker, and D1 support in independently testable slices.
+6. Reassess v2 priorities using actual operational evidence from v1/v1.1.
 
 ## OCI ingress implementation sequence
 
-1. **Complete:** Rust contracts and isolated control-plane preview.
-2. **Complete:** Optional rootless, persistent, read-only OCI data plane on loopback.
-3. **In progress:** Rust service-token verification, persisted upload grants, Registry v2 token issuance, and JWKS.
-4. Configure the registry to trust the Rust issuer and enable writes only through authenticated Tailscale ingress.
-5. Verify manifests and layers, create immutable artifact receipts, and require receipts for deployment.
-6. Migrate service blueprints and CrownFi away from external registry credentials.
+1. **Complete:** Rust contracts, service-token verification, persisted upload grants, Registry v2 JWT issuance, and public JWKS.
+2. **Complete:** Rootless persistent Distribution data plane on loopback with fail-closed read-only defaults.
+3. **Complete in source:** Dedicated Tailscale Service ingress, private HTTPS validation, disk/concurrency limits, and authenticated write unlock.
+4. **Complete in source:** Server-side manifest/config/layer verification, immutable artifact receipts, and manifest-v2 receipt enforcement for Arcturus-owned images.
+5. **In progress:** Migrate the Service Blueprint and CrownFi workflows to `arcturus-oci-publish.sh` and remove their external registry dependency.
+6. **Release gate:** Execute the clean-host, live-upgrade, real GitHub Actions, failure-injection, restart/re-pull, and registry-unavailable rollback acceptance matrix.
+7. **Remaining reliability:** Add release-aware retention pins and reviewed garbage collection before enabling deletion.

@@ -60,7 +60,7 @@ class ValidationTests(unittest.TestCase):
         payload = deploy_app.healthz()
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["service"], "arcturus-deployer")
-        self.assertEqual(payload["version"], "0.99.0-rc.2")
+        self.assertEqual(payload["version"], "1.0.0-rc.1")
         self.assertIn("authenticated-preflight", payload["features"])
         self.assertIn("legacy-compose-handoff", payload["features"])
 

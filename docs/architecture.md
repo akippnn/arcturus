@@ -37,9 +37,11 @@ Arcturus is a single-host application platform. It separates image construction,
 5. A deployment may reference only receipts accepted for the same service, component, and Git revision.
 6. The lifecycle service renders Quadlet and systemd units, activates them, verifies readiness, publishes routing state, and restores the previous healthy release on failure.
 
-### Current compatibility flow
+### Compatibility and lifecycle boundary
 
-Until artifact completion and receipt enforcement are implemented, existing projects may still push images to an external registry and submit digest-pinned references. The Python/FastAPI lifecycle service pre-pulls and verifies those images before activation. This compatibility path is retained for live deployments and recovery; it is not the architecture for new integrations.
+Artifact completion and receipt enforcement are implemented for images hosted by the configured Arcturus registry. The unchanged manifest-v2 lifecycle requires an accepted receipt bound to the same service, component, repository, Git revision, and digest before preflight may activate an Arcturus-owned image.
+
+Existing projects may still push images to an external registry and submit digest-pinned references. The Python/FastAPI lifecycle service pre-pulls and verifies those images before activation. This bounded compatibility path remains available for migration and emergency recovery. Rust does not yet own activation, rollback, or recovery.
 
 ## Workload modes
 

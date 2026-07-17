@@ -4,7 +4,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| "127.0.0.1:9190".to_owned())
         .parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    info!(%address, upload_auth_enabled, "Arcturus Rust control-plane preview listening");
+    info!(%address, upload_auth_enabled, "Arcturus Rust control plane listening");
 
     axum::serve(listener, application)
         .with_graceful_shutdown(shutdown_signal())

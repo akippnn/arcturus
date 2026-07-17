@@ -1,12 +1,16 @@
-FROM rust:1.97.0-alpine3.24 AS rust-build
+FROM rust:1.96.1-alpine3.24 AS rust-build
 
 ENV CARGO_NET_RETRY=5 \
     CARGO_HTTP_TIMEOUT=120
 
-RUN apk add --no-cache build-base
+RUN apk add --no-cache build-base \
+    && rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
 WORKDIR /build/rust
 COPY rust ./
-RUN cargo build --locked --release -p arcturusd
+RUN cargo +1.97.1 fmt --all --check \
+    && cargo +1.97.1 clippy --locked --workspace --all-targets --all-features -- -D warnings \
+    && cargo +1.97.1 test --locked --workspace --all-targets \
+    && cargo +1.97.1 build --locked --release -p arcturusd
 
 FROM node:22-alpine AS platform-build
 
@@ -26,6 +30,9 @@ RUN for module in bus registry router; do \
       done; \
       test "$installed" -eq 1; \
       npm run build; \
+      case "$module" in \
+        router|registry) node --test dist/*.test.js ;; \
+      esac; \
     done \
     && node -e "Promise.all([import('/build/modules/bus/dist/bus.js'), import('/build/modules/registry/dist/schema.js'), import('/build/modules/router/dist/router.js')])"
 
@@ -39,6 +46,7 @@ RUN mkdir -p wheelhouse \
     && python3.12 -m pip install --no-index --find-links wheelhouse --requirement requirements.txt
 COPY deploy/app.py deploy/image_policy_app.py deploy/release.py deploy/arcturusctl.py deploy/arcturusctl deploy/install-host.sh \
      deploy/arcturus-host-update deploy/render-oci-registry-quadlet.sh \
+     deploy/configure-oci-tailnet-ingress.sh deploy/arcturus-oci-publish.sh \
      deploy/arcturus-deployer@.service deploy/arcturus-podman-api.service \
      deploy/arcturus-bus.service deploy/arcturus-registry.service deploy/arcturus-router.service \
      deploy/arcturusd.service ./
@@ -51,17 +59,20 @@ COPY --from=platform-build /build/modules/registry/dist /opt/arcturus/modules/re
 COPY --from=platform-build /build/modules/registry/package.json /opt/arcturus/modules/registry/package.json
 COPY --from=platform-build /build/modules/registry/node_modules/zod /opt/arcturus/modules/registry/node_modules/zod
 RUN chmod 0755 arcturusctl.py arcturusctl install-host.sh arcturus-host-update \
-    render-oci-registry-quadlet.sh arcturusd
+    render-oci-registry-quadlet.sh configure-oci-tailnet-ingress.sh arcturus-oci-publish.sh arcturusd
 
 FROM base AS test
 COPY deploy/tests ./tests
 COPY deploy/build-bundle.sh ./
 RUN bash -n install-host.sh arcturus-host-update arcturusctl build-bundle.sh \
-        render-oci-registry-quadlet.sh tests/test-host-update.sh \
+        render-oci-registry-quadlet.sh configure-oci-tailnet-ingress.sh arcturus-oci-publish.sh tests/test-host-update.sh \
         tests/test-oci-registry-quadlet.sh tests/test-oci-registry-install-validation.sh \
+        tests/test-oci-tailnet-ingress.sh tests/test-oci-publish.sh \
     && ./tests/test-host-update.sh \
     && ./tests/test-oci-registry-quadlet.sh \
     && ./tests/test-oci-registry-install-validation.sh \
+    && ./tests/test-oci-tailnet-ingress.sh \
+    && ./tests/test-oci-publish.sh \
     && test -x arcturusd \
     && python3.12 -m py_compile app.py image_policy_app.py release.py arcturusctl.py \
     && CERT_DOMAIN=example.org python3.12 -m unittest discover -s tests -v \

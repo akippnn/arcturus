@@ -937,6 +937,84 @@ class QuadletRenderer:
             raise ValueError(f"bind source is outside allowed roots: {source}")
 
 
+class ArtifactReceiptVerifier:
+    """Enforce accepted receipts only for images hosted by Arcturus itself."""
+
+    def __init__(self, database: Path | None, registry_host: str | None):
+        self.database = database
+        self.registry_host = self._normalize_registry_host(registry_host)
+        if (self.database is None) != (self.registry_host is None):
+            raise ValueError(
+                "ARCTURUS_OCI_RECEIPT_DB and ARCTURUS_OCI_REGISTRY_HOST must be configured together"
+            )
+
+    @staticmethod
+    def _normalize_registry_host(value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip().removeprefix("https://").removeprefix("http://").rstrip("/")
+        if "/" in normalized or not re.fullmatch(
+            r"[a-z0-9][a-z0-9.-]*(?::[0-9]+)?", normalized
+        ):
+            raise ValueError("ARCTURUS_OCI_REGISTRY_HOST must be a registry hostname with optional port")
+        return normalized
+
+    def verify(self, manifest: ServiceRelease) -> list[str]:
+        if self.database is None or self.registry_host is None:
+            return []
+        owned: list[tuple[str, str, str]] = []
+        for component_name, component in manifest.spec.components.items():
+            match = IMAGE_RE.fullmatch(component.image)
+            if match is None:  # The manifest validator should make this unreachable.
+                raise RuntimeError(f"component {component_name} has an invalid image reference")
+            repository = match.group("repository")
+            host, _, path = repository.partition("/")
+            if host != self.registry_host:
+                continue
+            expected = f"{manifest.metadata.name}/{component_name}"
+            if path != expected:
+                raise RuntimeError(
+                    f"Arcturus-owned image repository mismatch for {component_name}: "
+                    f"expected {self.registry_host}/{expected}"
+                )
+            owned.append((component_name, path, match.group("digest")))
+        if not owned:
+            return []
+        if not self.database.is_file():
+            raise RuntimeError(f"Arcturus artifact receipt database is unavailable: {self.database}")
+        try:
+            connection = sqlite3.connect(self.database.resolve().as_uri() + "?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+            with connection:
+                receipt_ids: list[str] = []
+                for component, repository, digest in owned:
+                    receipt = connection.execute(
+                        "SELECT id FROM artifact_receipts "
+                        "WHERE service=? AND component=? AND repository=? AND revision=? "
+                        "AND manifest_digest=? AND status='accepted' LIMIT 1",
+                        (
+                            manifest.metadata.name,
+                            component,
+                            repository,
+                            manifest.metadata.revision,
+                            digest,
+                        ),
+                    ).fetchone()
+                    if receipt is None:
+                        raise RuntimeError(
+                            "accepted Arcturus artifact receipt not found for "
+                            f"{manifest.metadata.name}/{component}@{digest} "
+                            f"at revision {manifest.metadata.revision}"
+                        )
+                    receipt_ids.append(str(receipt["id"]))
+                return receipt_ids
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"Arcturus artifact receipt database is invalid: {exc}") from exc
+        finally:
+            if "connection" in locals():
+                connection.close()
+
+
 class DeploymentFailure(RuntimeError):
     def __init__(
         self,
@@ -965,6 +1043,8 @@ class ReleaseDeployer:
         runner: CommandRunner | None = None,
         podman: PodmanClient | None = None,
         validate_generator: bool = True,
+        artifact_receipt_db: Path | None = None,
+        owned_registry_host: str | None = None,
     ):
         self.state_dir = state_dir
         self.quadlet_dir = quadlet_dir
@@ -979,6 +1059,9 @@ class ReleaseDeployer:
         self.runner = runner or CommandRunner()
         self.podman = podman or PodmanClient(os.getenv("PODMAN_SOCKET"))
         self.validate_generator = validate_generator
+        self.artifact_receipts = ArtifactReceiptVerifier(
+            artifact_receipt_db, owned_registry_host
+        )
         for directory in (
             self.release_dir,
             self.lock_dir,
@@ -1017,6 +1100,10 @@ class ReleaseDeployer:
             ),
             allowed_bind_roots=[Path(item) for item in roots.split(",") if item],
             validate_generator=os.getenv("ARCTURUS_VALIDATE_QUADLET", "true").lower() == "true",
+            artifact_receipt_db=(
+                Path(value) if (value := os.getenv("ARCTURUS_OCI_RECEIPT_DB")) else None
+            ),
+            owned_registry_host=os.getenv("ARCTURUS_OCI_REGISTRY_HOST"),
         )
 
     @contextmanager
@@ -1142,6 +1229,7 @@ class ReleaseDeployer:
         if missing:
             details = "; ".join(f"{kind}={','.join(names)}" for kind, names in missing.items())
             raise RuntimeError(f"host prerequisites missing: {details}")
+        artifact_receipts = self.artifact_receipts.verify(manifest)
         return {
             "status": "ready",
             "service": manifest.metadata.name,
@@ -1149,6 +1237,7 @@ class ReleaseDeployer:
                 "secrets": secret_names,
                 "volumes": external_volumes,
                 "networks": external_networks,
+                "artifact_receipts": artifact_receipts,
             },
         }
 

@@ -25,14 +25,24 @@ This audit reconciles the post-RC2 changes with the accepted Arcturus-owned OCI 
 - GitHub is now the default project CI provider; legacy `gitea` values remain parseable only for migration compatibility.
 - Documentation now distinguishes the current external-registry/Python lifecycle compatibility path from the target Arcturus-owned OCI/Rust path.
 
+## v1.0.0 source disposition
+
+The critical ingress path is complete in source:
+
+1. authenticated local Distribution uploads through short-lived Rust-issued credentials;
+2. private Tailscale HTTPS routing with a same-origin token realm;
+3. server-side manifest, config, descriptor, layer, size, platform, revision, and ownership verification;
+4. immutable artifact/layer receipts with idempotent completion;
+5. manifest-v2 receipt enforcement for Arcturus-owned images;
+6. fail-closed read-only installation and upgrade behavior.
+
 ## Still intentionally incomplete
 
-The repository is not yet at the final architecture. The next required slices are:
+The `v1.0.0-rc.1` source candidate is not yet operationally accepted. Remaining gates are:
 
-1. authenticated local end-to-end OCI push validation;
-2. artifact completion, manifest/layer verification, and immutable receipts;
-3. deployment receipt enforcement;
-4. Tailscale/TLS exposure of the authorized OCI endpoint;
-5. migration of deployment read/preflight and lifecycle APIs from Python to Rust;
-6. signed GitHub Release host bundles and a signature-verifying updater;
-7. removal of external-registry and Python/FastAPI compatibility only after live acceptance and rollback parity.
+1. migrate the Service Blueprint and CrownFi CI to the generic Arcturus publisher;
+2. execute the real GitHub Actions, clean-host, live-upgrade, interruption/retry, expiry, cross-service, oversize, digest-mismatch, registry-restart, and registry-unavailable rollback matrix;
+3. implement release-aware retention pins and reviewed garbage collection before manifest deletion is enabled;
+4. publish signature-verifiable GitHub Release host bundles and replace the compatibility updater;
+5. migrate deployment read/preflight and later activation/rollback/recovery APIs from Python to Rust only after parity and rollback acceptance;
+6. remove external-registry and Python/FastAPI compatibility only after the live path no longer depends on them.

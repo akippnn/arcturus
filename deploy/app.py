@@ -20,11 +20,16 @@ load_dotenv()
 
 app = FastAPI(title="Arcturus Deploy Service")
 
-ARCTURUS_PRODUCT_VERSION = "0.99.0-rc.2"
+ARCTURUS_PRODUCT_VERSION = "1.0.0-rc.1"
 ARCTURUS_FEATURES = [
     "authenticated-preflight",
     "legacy-compose-handoff",
     "replayable-host-updates",
+    "oci-upload-grants",
+    "artifact-verification-and-receipts",
+    "receipt-enforced-owned-registry",
+    "tailscale-private-oci-ingress",
+    "bounded-artifact-verification",
 ]
 
 STACKS_BASE = Path(os.getenv("STACKS_BASE_DIR", "/data/stacks"))

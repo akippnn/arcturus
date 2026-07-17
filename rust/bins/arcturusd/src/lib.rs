@@ -1,23 +1,37 @@
+mod registry;
+
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arcturus_auth::{AuthError, ControlTokenVerifier, GrantStore, JwkSet, RegistryTokenIssuer};
-use arcturus_contracts::{ApiErrorBody, ApiErrorResponse, ArtifactUploadRequest, HealthResponse};
-use axum::extract::{RawQuery, State};
+use arcturus_contracts::{
+    ApiErrorBody, ApiErrorResponse, ArtifactUploadCompletionRequest, ArtifactUploadRequest,
+    HealthResponse,
+};
+use axum::extract::{Path as AxumPath, RawQuery, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, PRAGMA, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing::get, routing::post};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
+
+pub use registry::{RegistryPolicy, RegistryVerificationError, RegistryVerifier};
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub registry: String,
+    pub registry_internal: String,
     pub upload_ttl_seconds: i64,
+    pub expected_os: String,
+    pub expected_architecture: String,
+    pub max_layer_bytes: u64,
+    pub max_artifact_bytes: u64,
+    pub max_concurrent_verifications: usize,
 }
 
 #[derive(Clone)]
@@ -26,6 +40,8 @@ pub struct AppState {
     pub control_tokens: ControlTokenVerifier,
     pub grants: GrantStore,
     pub token_issuer: RegistryTokenIssuer,
+    pub registry_verifier: RegistryVerifier,
+    pub verification_slots: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -34,51 +50,125 @@ impl AppState {
         control_tokens: ControlTokenVerifier,
         grants: GrantStore,
         token_issuer: RegistryTokenIssuer,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, RegistryVerificationError> {
+        let registry_verifier = RegistryVerifier::new(
+            &config.registry_internal,
+            RegistryPolicy {
+                expected_os: config.expected_os.clone(),
+                expected_architecture: config.expected_architecture.clone(),
+                max_layer_bytes: config.max_layer_bytes,
+                max_artifact_bytes: config.max_artifact_bytes,
+            },
+        )?;
+        let verification_slots = Arc::new(Semaphore::new(config.max_concurrent_verifications));
+        Ok(Self {
             config,
             control_tokens,
             grants,
             token_issuer,
-        }
+            registry_verifier,
+            verification_slots,
+        })
     }
 
-    pub fn from_environment() -> Result<Self, AuthError> {
+    pub fn from_environment() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let home = env::var("HOME").unwrap_or_else(|_| ".".to_owned());
         let state_db = env::var("ARCTURUSD_STATE_DB")
-            .unwrap_or_else(|_| format!("{home}/.local/share/arcturus-deployer/oci-auth.sqlite3"));
+            .unwrap_or_else(|_| format!("{home}/.local/share/arcturus-oci-auth/grants.sqlite3"));
         let token_file = env::var("RUNNER_TOKENS_FILE")
             .unwrap_or_else(|_| format!("{home}/.config/arcturus/tokens.json"));
         let signing_key = env::var("ARCTURUS_OCI_SIGNING_KEY").map_err(|_| {
             AuthError::InvalidSigningKey("ARCTURUS_OCI_SIGNING_KEY is required".into())
         })?;
         let jwks_file = env::var("ARCTURUS_OCI_JWKS_FILE")
-            .unwrap_or_else(|_| format!("{home}/.local/share/arcturus-deployer/oci-jwks.json"));
+            .unwrap_or_else(|_| format!("{home}/.local/share/arcturus-oci-auth/jwks.json"));
         let issuer =
             env::var("ARCTURUS_OCI_TOKEN_ISSUER").unwrap_or_else(|_| "arcturusd".to_owned());
         let audience =
             env::var("ARCTURUS_OCI_TOKEN_SERVICE").unwrap_or_else(|_| "arcturus-oci".to_owned());
-        let registry =
-            env::var("ARCTURUS_OCI_REGISTRY").unwrap_or_else(|_| "127.0.0.1:9443".to_owned());
+        let registry = env::var("ARCTURUS_OCI_REGISTRY")
+            .unwrap_or_else(|_| "127.0.0.1:9443".to_owned());
+        let registry_internal = env::var("ARCTURUS_OCI_REGISTRY_INTERNAL")
+            .unwrap_or_else(|_| "http://127.0.0.1:9443".to_owned());
+        let expected_os = env::var("ARCTURUS_OCI_EXPECTED_OS")
+            .unwrap_or_else(|_| "linux".to_owned());
+        let expected_architecture = env::var("ARCTURUS_OCI_EXPECTED_ARCH")
+            .unwrap_or_else(|_| match std::env::consts::ARCH {
+                "x86_64" => "amd64".to_owned(),
+                "aarch64" => "arm64".to_owned(),
+                other => other.to_owned(),
+            });
+        let max_layer_bytes = environment_u64("ARCTURUS_OCI_MAX_LAYER_BYTES", 536_870_912)?;
+        let max_artifact_bytes =
+            environment_u64("ARCTURUS_OCI_MAX_ARTIFACT_BYTES", 805_306_368)?;
+        if max_artifact_bytes < max_layer_bytes {
+            return Err(AuthError::Serialization(
+                "ARCTURUS_OCI_MAX_ARTIFACT_BYTES must be at least ARCTURUS_OCI_MAX_LAYER_BYTES"
+                    .into(),
+            )
+            .into());
+        }
+        let max_concurrent_verifications = environment_usize_range(
+            "ARCTURUS_OCI_MAX_CONCURRENT_VERIFICATIONS",
+            2,
+            1,
+            16,
+        )?;
         let upload_ttl_seconds = env::var("ARCTURUS_OCI_UPLOAD_TTL_SECONDS")
             .unwrap_or_else(|_| "600".to_owned())
             .parse::<i64>()
             .map_err(|error| AuthError::Serialization(error.to_string()))?;
         if !(60..=900).contains(&upload_ttl_seconds) {
-            return Err(AuthError::InvalidGrantLifetime);
+            return Err(AuthError::InvalidGrantLifetime.into());
         }
         let token_issuer = RegistryTokenIssuer::from_seed_file(signing_key, issuer, audience)?;
         token_issuer.write_jwks(jwks_file)?;
-        Ok(Self::new(
+        Self::new(
             AppConfig {
                 registry,
+                registry_internal,
                 upload_ttl_seconds,
+                expected_os,
+                expected_architecture,
+                max_layer_bytes,
+                max_artifact_bytes,
+                max_concurrent_verifications,
             },
             ControlTokenVerifier::new(PathBuf::from(token_file)),
             GrantStore::open(state_db)?,
             token_issuer,
-        ))
+        )
+        .map_err(Into::into)
     }
+}
+
+fn environment_usize_range(
+    name: &str,
+    default: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Result<usize, AuthError> {
+    let value = env::var(name).unwrap_or_else(|_| default.to_string());
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|error| AuthError::Serialization(format!("{name}: {error}")))?;
+    if !(minimum..=maximum).contains(&parsed) {
+        return Err(AuthError::Serialization(format!(
+            "{name} must be between {minimum} and {maximum}"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn environment_u64(name: &str, default: u64) -> Result<u64, AuthError> {
+    let value = env::var(name).unwrap_or_else(|_| default.to_string());
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|error| AuthError::Serialization(format!("{name}: {error}")))?;
+    if parsed == 0 {
+        return Err(AuthError::Serialization(format!("{name} must be positive")));
+    }
+    Ok(parsed)
 }
 
 pub fn health_response() -> HealthResponse {
@@ -87,11 +177,12 @@ pub fn health_response() -> HealthResponse {
         service: "arcturusd".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         features: vec![
-            "rust-control-plane-preview".to_owned(),
-            "oci-ingress-contracts".to_owned(),
-            "oci-upload-grants-preview".to_owned(),
-            "registry-token-issuer-preview".to_owned(),
-            "python-compatibility-boundary".to_owned(),
+            "rust-control-plane".to_owned(),
+            "oci-upload-grants".to_owned(),
+            "registry-token-issuer".to_owned(),
+            "artifact-verification-and-receipts".to_owned(),
+            "bounded-artifact-verification".to_owned(),
+            "manifest-v2-python-lifecycle".to_owned(),
         ],
     }
 }
@@ -131,6 +222,77 @@ async fn create_artifact_upload(
     Ok(no_store_json(StatusCode::CREATED, grant))
 }
 
+async fn complete_artifact_upload(
+    State(state): State<Arc<AppState>>,
+    AxumPath(upload_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<ArtifactUploadCompletionRequest>,
+) -> Result<Response, ApiFailure> {
+    request
+        .validate()
+        .map_err(|error| ApiFailure::bad_request(error.to_string()))?;
+    let authorization = header_text(&headers, AUTHORIZATION)?.to_owned();
+    let store = state.grants.clone();
+    let lookup_id = upload_id.clone();
+    let started_at = unix_timestamp();
+    let grant = tokio::task::spawn_blocking(move || {
+        store.get_for_completion(&lookup_id, started_at)
+    })
+    .await
+    .map_err(|_| ApiFailure::internal("upload grant lookup task failed"))??;
+    let service = grant.service.clone();
+    let verifier = state.control_tokens.clone();
+    tokio::task::spawn_blocking(move || verifier.authorize(&authorization, &service))
+        .await
+        .map_err(|_| ApiFailure::internal("control token verification task failed"))?
+        .map_err(ApiFailure::control_auth)?;
+
+    let store = state.grants.clone();
+    let existing_grant = grant.clone();
+    let existing_request = request.clone();
+    if let Some(existing) = tokio::task::spawn_blocking(move || {
+        store.existing_completion(&existing_grant, &existing_request)
+    })
+    .await
+    .map_err(|_| ApiFailure::internal("artifact receipt lookup task failed"))??
+    {
+        return Ok(no_store_json(StatusCode::OK, existing));
+    }
+    if grant.completed_at.is_some() {
+        return Err(ApiFailure::conflict(
+            "upload grant is marked complete but has no consistent receipts",
+        ));
+    }
+
+    let artifacts = state
+        .registry_verifier
+        .verify(
+            &grant,
+            &request,
+            &state.token_issuer,
+            state.verification_slots.clone(),
+            started_at,
+        )
+        .await
+        .map_err(ApiFailure::registry_verification)?;
+    let store = state.grants.clone();
+    let persisted_grant = grant.clone();
+    let persisted_request = request.clone();
+    let accepted_at = unix_timestamp();
+    let completion = tokio::task::spawn_blocking(move || {
+        store.complete(
+            &persisted_grant,
+            &persisted_request,
+            &artifacts,
+            started_at,
+            accepted_at,
+        )
+    })
+    .await
+    .map_err(|_| ApiFailure::internal("artifact receipt persistence task failed"))??;
+    Ok(no_store_json(StatusCode::CREATED, completion))
+}
+
 async fn registry_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -162,6 +324,10 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/v1/rust/healthz", get(healthz))
         .route("/v1/artifact-uploads", post(create_artifact_upload))
+        .route(
+            "/v1/artifact-uploads/{upload_id}/complete",
+            post(complete_artifact_upload),
+        )
         .route("/auth/token", get(registry_token))
         .route("/v1/oci/jwks.json", get(jwks))
         .with_state(Arc::new(state))
@@ -187,7 +353,7 @@ fn header_text(
 
 fn basic_credentials(headers: &HeaderMap) -> Result<(String, String), ApiFailure> {
     let authorization = header_text(headers, AUTHORIZATION)?;
-    let (scheme, encoded) = authorization
+    let (_, encoded) = authorization
         .split_once(' ')
         .filter(|(scheme, encoded)| scheme.eq_ignore_ascii_case("Basic") && !encoded.is_empty())
         .ok_or_else(|| {
@@ -195,7 +361,6 @@ fn basic_credentials(headers: &HeaderMap) -> Result<(String, String), ApiFailure
                 "registry token endpoint requires Basic authentication",
             )
         })?;
-    let _ = scheme;
     let decoded = STANDARD
         .decode(encoded)
         .map_err(|_| ApiFailure::registry_unauthorized("registry credentials are malformed"))?;
@@ -285,6 +450,7 @@ impl ApiFailure {
         match error {
             AuthError::InvalidGrantCredentials
             | AuthError::GrantExpired
+            | AuthError::GrantCompleted
             | AuthError::GrantNearExpiry => Self::registry_unauthorized(error.to_string()),
             other => Self::from(other),
         }
@@ -296,6 +462,46 @@ impl ApiFailure {
             code: "forbidden",
             message: message.into(),
             challenge: None,
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "conflict",
+            message: message.into(),
+            challenge: None,
+        }
+    }
+
+    fn unprocessable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "artifact_rejected",
+            message: message.into(),
+            challenge: None,
+        }
+    }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "registry_unavailable",
+            message: message.into(),
+            challenge: None,
+        }
+    }
+
+    fn registry_verification(error: RegistryVerificationError) -> Self {
+        match error {
+            RegistryVerificationError::Rejected(message) => Self::unprocessable(message),
+            RegistryVerificationError::Unavailable(message)
+            | RegistryVerificationError::InvalidResponse(message) => Self::bad_gateway(message),
+            RegistryVerificationError::Authorization(error) => Self::from(error),
+            RegistryVerificationError::InvalidConfiguration(message) => Self::internal(message),
+            RegistryVerificationError::Json(error) => {
+                Self::unprocessable(format!("registry object is not valid OCI JSON: {error}"))
+            }
         }
     }
 
@@ -318,6 +524,15 @@ impl From<AuthError> for ApiFailure {
             | AuthError::GrantExpired
             | AuthError::GrantNearExpiry => Self::unauthorized(error.to_string()),
             AuthError::ServiceForbidden(_) => Self::forbidden(error.to_string()),
+            AuthError::GrantNotFound => Self {
+                status: StatusCode::NOT_FOUND,
+                code: "not_found",
+                message: error.to_string(),
+                challenge: None,
+            },
+            AuthError::GrantCompleted | AuthError::CompletionMismatch(_) => {
+                Self::conflict(error.to_string())
+            }
             AuthError::InvalidRegistryService | AuthError::InvalidScope(_) => {
                 Self::bad_request(error.to_string())
             }
@@ -402,7 +617,13 @@ mod tests {
         AppState::new(
             AppConfig {
                 registry: "arcturus.internal:9443".into(),
+                registry_internal: "http://127.0.0.1:9443".into(),
                 upload_ttl_seconds: 600,
+                expected_os: "linux".into(),
+                expected_architecture: "amd64".into(),
+                max_layer_bytes: 536_870_912,
+                max_artifact_bytes: 805_306_368,
+                max_concurrent_verifications: 2,
             },
             ControlTokenVerifier::new(token_path),
             GrantStore::open_in_memory().unwrap(),
@@ -412,17 +633,18 @@ mod tests {
                 "arcturus-oci",
             ),
         )
+        .unwrap()
     }
 
     #[test]
-    fn health_contract_advertises_preview_boundary() {
+    fn health_contract_advertises_receipt_boundary() {
         let response = health_response();
         assert_eq!(response.status, "ok");
         assert_eq!(response.service, "arcturusd");
         assert!(
             response
                 .features
-                .contains(&"registry-token-issuer-preview".to_owned())
+                .contains(&"artifact-verification-and-receipts".to_owned())
         );
     }
 

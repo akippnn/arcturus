@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "product": "arcturus",
-  "productVersion": "0.99.0-rc.2",
+  "productVersion": "1.0.0-rc.1",
   "manifestApis": [
     "arcturus.u128.org/v1",
     "arcturus.u128.org/v2"
@@ -9,6 +9,11 @@
   "features": [
     "authenticated-preflight",
     "legacy-compose-handoff",
-    "replayable-host-updates"
+    "replayable-host-updates",
+    "oci-upload-grants",
+    "artifact-verification-and-receipts",
+    "receipt-enforced-owned-registry",
+    "tailscale-private-oci-ingress",
+    "bounded-artifact-verification"
   ]
 }

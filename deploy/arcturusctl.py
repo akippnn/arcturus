@@ -448,7 +448,7 @@ def command_project_preflight(args: argparse.Namespace) -> None:
         raise SystemExit(
             "Arcturus host is incompatible with this blueprint "
             f"(host version: {version}; missing features: {', '.join(missing_features)}). "
-            "Upgrade the host to Arcturus 0.99.0-rc.2 or newer before deploying."
+            "Upgrade the host to an Arcturus host with authenticated preflight support before deploying."
         )
     preflight = api_request(
         api_args,

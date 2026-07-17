@@ -19,16 +19,18 @@ Usage: install-host.sh [options]
   --base-domain DOMAIN       Router-managed base domain
   --cert-domain DOMAIN       TLS certificate domain (default: base domain)
   --container-cli podman     Container CLI used by the router
-  --oci-registry-image IMAGE  Digest-pinned Distribution image; enables loopback OCI storage
+  --oci-registry-image IMAGE  Digest-pinned, supported Distribution v3 image; enables OCI storage
   --oci-registry-port PORT    Loopback OCI port (default: 9443)
   --oci-registry-storage DIR  Persistent OCI storage (default: ~/.local/share/arcturus-registry)
   --enable-oci-auth           Install Rust auth and configure registry token verification
   --disable-oci-auth          Keep local registry but disable Rust token authorization
+  --oci-registry-host HOST    Advertised private HTTPS registry hostname (*.ts.net)
+  --oci-tailscale-service SVC Dedicated Tailscale Service name (svc:<name>)
   --disable-oci-registry      Disable and remove the local OCI data-plane unit
   --configure-firewall        Add a source-scoped firewalld rule for port 9090
   --validate-only             Validate inputs and prerequisites without writing
   --dry-run                   Print the resolved installation without writing
-  --force-config              Replace deployer.env after making a backup
+  --force-config              Replace managed env files after making backups
 EOF
 }
 
@@ -51,6 +53,12 @@ OCI_REGISTRY_PORT_SET=false
 OCI_REGISTRY_STORAGE=""
 OCI_AUTH_SET=false
 OCI_AUTH_ENABLED=false
+OCI_REGISTRY_HOST=""
+OCI_TAILSCALE_SERVICE=""
+OCI_TAILSCALE_SERVICE_TO_CLEAR=""
+OCI_MAX_LAYER_BYTES=536870912
+OCI_MAX_ARTIFACT_BYTES=805306368
+OCI_MIN_FREE_BYTES=$((OCI_MAX_ARTIFACT_BYTES * 2))
 DISABLE_OCI_REGISTRY=false
 CONFIGURE_FIREWALL=false
 VALIDATE_ONLY=false
@@ -79,6 +87,8 @@ while (($#)); do
     --oci-registry-storage) OCI_REGISTRY_STORAGE="$2"; shift 2 ;;
     --enable-oci-auth) OCI_AUTH_SET=true; OCI_AUTH_ENABLED=true; shift ;;
     --disable-oci-auth) OCI_AUTH_SET=true; OCI_AUTH_ENABLED=false; shift ;;
+    --oci-registry-host) OCI_REGISTRY_HOST="$2"; shift 2 ;;
+    --oci-tailscale-service) OCI_TAILSCALE_SERVICE="$2"; shift 2 ;;
     --disable-oci-registry) DISABLE_OCI_REGISTRY=true; shift ;;
     --configure-firewall) CONFIGURE_FIREWALL=true; shift ;;
     --validate-only) VALIDATE_ONLY=true; shift ;;
@@ -94,7 +104,7 @@ PYTHON_BIN="${ARCTURUS_PYTHON:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   command -v python3.12 >/dev/null 2>&1 && PYTHON_BIN=python3.12 || PYTHON_BIN=python3
 fi
-for command in bash "$PYTHON_BIN" node podman systemctl systemd-analyze sha256sum getent curl; do
+for command in bash "$PYTHON_BIN" node podman systemctl systemd-analyze sha256sum getent curl df sed; do
   command -v "$command" >/dev/null 2>&1 || errors+=("missing prerequisite: $command")
 done
 if command -v "$PYTHON_BIN" >/dev/null 2>&1 && ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
@@ -150,7 +160,8 @@ fi
 if [[ -n "$SOURCE_DIR" ]]; then
   for file in app.py image_policy_app.py release.py arcturusctl.py arcturus-deployer@.service \
     arcturus-podman-api.service arcturus-bus.service arcturus-registry.service \
-    arcturus-router.service arcturusd.service render-oci-registry-quadlet.sh; do
+    arcturus-router.service arcturusd.service render-oci-registry-quadlet.sh \
+    configure-oci-tailnet-ingress.sh arcturus-oci-publish.sh; do
     [[ -f "$SOURCE_DIR/$file" ]] || errors+=("source artifact is missing: $SOURCE_DIR/$file")
   done
   source_root_check="$(cd "$SOURCE_DIR/.." 2>/dev/null && pwd || true)"
@@ -188,6 +199,59 @@ read_existing_value() {
   [[ -f "$file" ]] || return 0
   sed -n "s/^${key}=//p" "$file" | tail -n 1
 }
+
+install_managed_env() {
+  local rendered="$1" destination="$2" merged backup
+  if [[ ! -f "$destination" || "$FORCE_CONFIG" == true ]]; then
+    if [[ -f "$destination" ]]; then
+      backup="$destination.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+      cp -a "$destination" "$backup"
+    fi
+    install -m 0600 "$rendered" "$destination"
+    return
+  fi
+
+  merged="$(mktemp)"
+  "$PYTHON_BIN" - "$destination" "$rendered" "$merged" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+existing_path, rendered_path, merged_path = map(Path, sys.argv[1:])
+assignment = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
+rendered_lines = rendered_path.read_text(encoding="utf-8").splitlines()
+managed: dict[str, str] = {}
+managed_order: list[str] = []
+for line in rendered_lines:
+    match = assignment.match(line)
+    if not match:
+        continue
+    key = match.group(1)
+    if key not in managed:
+        managed_order.append(key)
+    managed[key] = line
+
+output: list[str] = []
+emitted: set[str] = set()
+for line in existing_path.read_text(encoding="utf-8").splitlines():
+    match = assignment.match(line)
+    if not match or match.group(1) not in managed:
+        output.append(line)
+        continue
+    key = match.group(1)
+    if key not in emitted:
+        output.append(managed[key])
+        emitted.add(key)
+for key in managed_order:
+    if key not in emitted:
+        output.append(managed[key])
+merged_path.write_text("\n".join(output) + "\n", encoding="utf-8")
+PY
+  backup="$destination.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -a "$destination" "$backup"
+  install -m 0600 "$merged" "$destination"
+  rm -f "$merged"
+}
 if ((${#ALLOWED_BIND_ROOTS[@]} == 0)); then
   existing_roots="$(read_existing_value "$existing_deployer_config" ARCTURUS_ALLOWED_BIND_ROOTS)"
   if [[ -n "$existing_roots" ]]; then
@@ -203,13 +267,18 @@ if [[ "$NGINX_CONTAINER" == portal-nginx ]]; then
   existing_nginx="$(read_existing_value "$existing_platform_config" NGINX_CONTAINER)"
   [[ -z "$existing_nginx" ]] || NGINX_CONTAINER="$existing_nginx"
 fi
-if ! $DISABLE_OCI_REGISTRY; then
+existing_oci_service="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_TAILSCALE_SERVICE)"
+if $DISABLE_OCI_REGISTRY; then
+  OCI_TAILSCALE_SERVICE_TO_CLEAR="$existing_oci_service"
+else
   [[ -n "$OCI_REGISTRY_IMAGE" ]] || OCI_REGISTRY_IMAGE="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_REGISTRY_IMAGE)"
   if ! $OCI_REGISTRY_PORT_SET; then
     existing_oci_port="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_REGISTRY_PORT)"
     [[ -z "$existing_oci_port" ]] || OCI_REGISTRY_PORT="$existing_oci_port"
   fi
   [[ -n "$OCI_REGISTRY_STORAGE" ]] || OCI_REGISTRY_STORAGE="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_REGISTRY_STORAGE)"
+  [[ -n "$OCI_REGISTRY_HOST" ]] || OCI_REGISTRY_HOST="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_REGISTRY_HOST)"
+  [[ -n "$OCI_TAILSCALE_SERVICE" ]] || OCI_TAILSCALE_SERVICE="$existing_oci_service"
   if ! $OCI_AUTH_SET; then
     existing_oci_auth="$(read_existing_value "$existing_oci_config" ARCTURUS_OCI_AUTH_ENABLED)"
     case "$existing_oci_auth" in
@@ -220,6 +289,17 @@ if ! $DISABLE_OCI_REGISTRY; then
         exit 2
         ;;
     esac
+  fi
+  if $OCI_AUTH_SET && [[ "$OCI_AUTH_ENABLED" != true ]]; then
+    # Explicitly disabling authorization also removes remote write ingress. Keep
+    # the old Service name long enough to drain and clear it after the local
+    # registry has been returned to its authenticated-disabled, read-only state.
+    OCI_TAILSCALE_SERVICE_TO_CLEAR="$existing_oci_service"
+    OCI_REGISTRY_HOST=""
+    OCI_TAILSCALE_SERVICE=""
+  elif [[ -n "$existing_oci_service" && "$existing_oci_service" != "$OCI_TAILSCALE_SERVICE" ]]; then
+    # A Service rename must not leave the old private ingress advertised.
+    OCI_TAILSCALE_SERVICE_TO_CLEAR="$existing_oci_service"
   fi
 fi
 
@@ -254,11 +334,11 @@ fi
 if [[ -n "$OCI_REGISTRY_STORAGE" && ! "$OCI_REGISTRY_STORAGE" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
   oci_errors+=("--oci-registry-storage must be an absolute path without whitespace")
 fi
-if $DISABLE_OCI_REGISTRY && { [[ -n "$OCI_REGISTRY_IMAGE" ]] || $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]] || $OCI_AUTH_SET; }; then
+if $DISABLE_OCI_REGISTRY && { [[ -n "$OCI_REGISTRY_IMAGE" ]] || $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]] || $OCI_AUTH_SET || [[ -n "$OCI_REGISTRY_HOST" ]] || [[ -n "$OCI_TAILSCALE_SERVICE" ]]; }; then
   oci_errors+=("--disable-oci-registry cannot be combined with OCI registry configuration options")
 fi
-if [[ -z "$OCI_REGISTRY_IMAGE" ]] && ! $DISABLE_OCI_REGISTRY && { $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]] || $OCI_AUTH_ENABLED; }; then
-  oci_errors+=("OCI registry port, storage, or authorization requires --oci-registry-image or an existing OCI configuration")
+if [[ -z "$OCI_REGISTRY_IMAGE" ]] && ! $DISABLE_OCI_REGISTRY && { $OCI_REGISTRY_PORT_SET || [[ -n "$OCI_REGISTRY_STORAGE" ]] || $OCI_AUTH_ENABLED || [[ -n "$OCI_REGISTRY_HOST" ]] || [[ -n "$OCI_TAILSCALE_SERVICE" ]]; }; then
+  oci_errors+=("OCI registry port, storage, authorization, or tailnet ingress requires --oci-registry-image or an existing OCI configuration")
 fi
 if $OCI_AUTH_ENABLED && [[ "$OCI_REGISTRY_PORT" == 9190 ]]; then
   oci_errors+=("--oci-registry-port must not conflict with the Rust authorization port 9190")
@@ -266,10 +346,29 @@ fi
 if $OCI_AUTH_ENABLED && [[ -n "$SOURCE_DIR" && ! -x "$SOURCE_DIR/arcturusd" ]]; then
   oci_errors+=("--enable-oci-auth requires a compiled executable at $SOURCE_DIR/arcturusd")
 fi
+if [[ -n "$OCI_REGISTRY_HOST" && ! "$OCI_REGISTRY_HOST" =~ ^[a-z0-9][a-z0-9.-]*\.ts\.net$ ]]; then
+  oci_errors+=("--oci-registry-host must be a full lowercase Tailscale hostname ending in .ts.net")
+fi
+if [[ -n "$OCI_TAILSCALE_SERVICE" && ! "$OCI_TAILSCALE_SERVICE" =~ ^svc:[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+  oci_errors+=("--oci-tailscale-service must use svc:<lowercase-name> format")
+fi
+if [[ -n "$OCI_REGISTRY_HOST" && -z "$OCI_TAILSCALE_SERVICE" ]] || [[ -z "$OCI_REGISTRY_HOST" && -n "$OCI_TAILSCALE_SERVICE" ]]; then
+  oci_errors+=("--oci-registry-host and --oci-tailscale-service must be configured together")
+fi
+if [[ -n "$OCI_TAILSCALE_SERVICE" && "$OCI_AUTH_ENABLED" != true ]]; then
+  oci_errors+=("Tailscale OCI ingress requires --enable-oci-auth")
+fi
+if [[ -n "$OCI_TAILSCALE_SERVICE" ]] && ! command -v tailscale >/dev/null 2>&1; then
+  oci_errors+=("missing prerequisite for OCI tailnet ingress: tailscale")
+fi
 if ((${#oci_errors[@]})); then
   printf 'Arcturus OCI registry validation failed\n' >&2
   printf '  - %s\n' "${oci_errors[@]}" >&2
   exit 2
+fi
+OCI_WRITABLE_ENABLED=false
+if $OCI_AUTH_ENABLED && [[ -n "$OCI_REGISTRY_HOST" && -n "$OCI_TAILSCALE_SERVICE" ]]; then
+  OCI_WRITABLE_ENABLED=true
 fi
 
 STATE_DIR="$HOST_HOME/.local/share/arcturus-deployer"
@@ -291,7 +390,16 @@ OCI_JWKS_FILE="$OCI_AUTH_STATE_DIR/jwks.json"
 OCI_AUTH_DB="$OCI_AUTH_STATE_DIR/grants.sqlite3"
 
 if [[ -z "$VERSION" && -n "$SOURCE_DIR" ]]; then
-  VERSION="local-$(find "$SOURCE_DIR" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)"
+  source_root="$(cd "$SOURCE_DIR/.." && pwd)"
+  VERSION="local-$(
+    {
+      find "$SOURCE_DIR" -maxdepth 1 -type f -print0
+      for module in bus registry router; do
+        find "$source_root/modules/$module/dist" -type f -print0 2>/dev/null || true
+        [[ ! -f "$source_root/modules/$module/package.json" ]]           || printf '%s\0' "$source_root/modules/$module/package.json"
+      done
+    } | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12
+  )"
 fi
 if [[ -z "$VERSION" ]]; then
   bundle_digest="${BUNDLE##*@sha256:}"
@@ -309,6 +417,8 @@ Arcturus host configuration
   router:            ${BASE_DOMAIN:-disabled}${BASE_DOMAIN:+ via $NGINX_CONTAINER}
   OCI data plane:    ${OCI_REGISTRY_IMAGE:-disabled}${OCI_REGISTRY_IMAGE:+ on 127.0.0.1:$OCI_REGISTRY_PORT}
   OCI authorization: $([[ "$OCI_AUTH_ENABLED" == true ]] && echo enabled || echo disabled)
+  OCI private HTTPS: ${OCI_REGISTRY_HOST:-disabled}${OCI_TAILSCALE_SERVICE:+ via $OCI_TAILSCALE_SERVICE}
+  OCI write ingress: $([[ "$OCI_WRITABLE_ENABLED" == true ]] && echo enabled-after-validation || echo read-only)
   OCI storage:       ${OCI_REGISTRY_STORAGE:-not configured}
   state:             $STATE_DIR
   allowed bind roots: $(IFS=,; echo "${ALLOWED_BIND_ROOTS[*]}")
@@ -327,10 +437,44 @@ mkdir -p "$STATE_DIR/releases" "$STATE_DIR/active-manifests" "$CONFIG_DIR" "$UNI
 staging="$(mktemp -d "$STATE_DIR/releases/.install.XXXXXX")"
 container_id=""
 rendered_config=""
+oci_unlock_guard_armed=false
+
+set_oci_registry_read_only() {
+  local value="$1" temporary
+  [[ -f "$OCI_RUNTIME_ENV_FILE" ]] || return 1
+  temporary="$(mktemp "${OCI_RUNTIME_ENV_FILE}.tmp.XXXXXX")"
+  awk -v value="$value" '
+    BEGIN { replaced = 0 }
+    /^REGISTRY_STORAGE_MAINTENANCE_READONLY_ENABLED=/ {
+      if (!replaced) {
+        print "REGISTRY_STORAGE_MAINTENANCE_READONLY_ENABLED=" value
+        replaced = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!replaced) {
+        print "REGISTRY_STORAGE_MAINTENANCE_READONLY_ENABLED=" value
+      }
+    }
+  ' "$OCI_RUNTIME_ENV_FILE" >"$temporary"
+  chmod 0600 "$temporary"
+  mv -f "$temporary" "$OCI_RUNTIME_ENV_FILE"
+  grep -qx "REGISTRY_STORAGE_MAINTENANCE_READONLY_ENABLED=$value"     "$OCI_RUNTIME_ENV_FILE"
+}
+
 cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ "$oci_unlock_guard_armed" == true ]]; then
+    set_oci_registry_read_only true >/dev/null 2>&1 || true
+    systemctl --user restart arcturus-oci-registry.service >/dev/null 2>&1 || true
+  fi
   [[ -z "$container_id" ]] || podman rm "$container_id" >/dev/null 2>&1 || true
   [[ ! -d "$staging" ]] || rm -rf "$staging"
   [[ -z "$rendered_config" ]] || rm -f "$rendered_config"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -338,11 +482,12 @@ if [[ -n "$SOURCE_DIR" ]]; then
   for file in app.py image_policy_app.py release.py arcturusctl.py requirements.txt \
     arcturus-deployer@.service arcturus-podman-api.service arcturus-bus.service \
     arcturus-registry.service arcturus-router.service arcturusd.service arcturusctl \
-    render-oci-registry-quadlet.sh; do
+    render-oci-registry-quadlet.sh configure-oci-tailnet-ingress.sh arcturus-oci-publish.sh; do
     install -m 0644 "$SOURCE_DIR/$file" "$staging/$file"
   done
   chmod 0755 "$staging/arcturusctl" "$staging/arcturusctl.py" \
-    "$staging/render-oci-registry-quadlet.sh"
+    "$staging/render-oci-registry-quadlet.sh" "$staging/configure-oci-tailnet-ingress.sh" \
+    "$staging/arcturus-oci-publish.sh"
   if [[ -x "$SOURCE_DIR/arcturusd" ]]; then
     install -m 0755 "$SOURCE_DIR/arcturusd" "$staging/arcturusd"
   fi
@@ -402,17 +547,10 @@ RUNNER_TOKENS_FILE=$CONFIG_DIR/tokens.json
 ARCTURUS_ROUTER_STATUS_FILE=$RUNTIME_DIR/router-status.json
 ARCTURUS_REGISTRY_SOCKET=$RUNTIME_DIR/registry.sock
 ARCTURUS_OCI_REGISTRY_URL=${OCI_REGISTRY_IMAGE:+http://127.0.0.1:$OCI_REGISTRY_PORT}
+ARCTURUS_OCI_RECEIPT_DB=$([[ "$OCI_WRITABLE_ENABLED" == true ]] && printf '%s' "$OCI_AUTH_DB")
+ARCTURUS_OCI_REGISTRY_HOST=$([[ "$OCI_WRITABLE_ENABLED" == true ]] && printf '%s' "$OCI_REGISTRY_HOST")
 EOF
-if [[ ! -f "$CONFIG_FILE" || $FORCE_CONFIG == true ]]; then
-  if [[ -f "$CONFIG_FILE" ]]; then
-    cp -a "$CONFIG_FILE" "$CONFIG_FILE.backup.$(date -u +%Y%m%dT%H%M%SZ)"
-  fi
-  install -m 0600 "$rendered_config" "$CONFIG_FILE"
-else
-  proposed="$CONFIG_FILE.proposed.$VERSION"
-  install -m 0600 "$rendered_config" "$proposed"
-  echo "Preserving existing $CONFIG_FILE; proposed configuration: $proposed" >&2
-fi
+install_managed_env "$rendered_config" "$CONFIG_FILE"
 
 rendered_platform="$(mktemp)"
 cat >"$rendered_platform" <<EOF
@@ -428,13 +566,7 @@ CERT_DOMAIN=$CERT_DOMAIN
 CONTAINER_CLI=$CONTAINER_CLI
 ARCTURUS_OCI_REGISTRY_URL=${OCI_REGISTRY_IMAGE:+http://127.0.0.1:$OCI_REGISTRY_PORT}
 EOF
-if [[ ! -f "$PLATFORM_CONFIG_FILE" || $FORCE_CONFIG == true ]]; then
-  [[ ! -f "$PLATFORM_CONFIG_FILE" ]] || cp -a "$PLATFORM_CONFIG_FILE" "$PLATFORM_CONFIG_FILE.backup.$(date -u +%Y%m%dT%H%M%SZ)"
-  install -m 0600 "$rendered_platform" "$PLATFORM_CONFIG_FILE"
-else
-  install -m 0600 "$rendered_platform" "$PLATFORM_CONFIG_FILE.proposed.$VERSION"
-  echo "Preserving existing $PLATFORM_CONFIG_FILE; proposed configuration staged." >&2
-fi
+install_managed_env "$rendered_platform" "$PLATFORM_CONFIG_FILE"
 rm -f "$rendered_platform"
 
 if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
@@ -447,8 +579,11 @@ ARCTURUS_OCI_REGISTRY_PORT=$OCI_REGISTRY_PORT
 ARCTURUS_OCI_REGISTRY_STORAGE=$OCI_REGISTRY_STORAGE
 ARCTURUS_OCI_REGISTRY_URL=http://127.0.0.1:$OCI_REGISTRY_PORT
 ARCTURUS_OCI_AUTH_ENABLED=$OCI_AUTH_ENABLED
+ARCTURUS_OCI_WRITABLE_ENABLED=$OCI_WRITABLE_ENABLED
+ARCTURUS_OCI_REGISTRY_HOST=$OCI_REGISTRY_HOST
+ARCTURUS_OCI_TAILSCALE_SERVICE=$OCI_TAILSCALE_SERVICE
 EOF
-  install -m 0600 "$rendered_oci" "$OCI_CONFIG_FILE"
+  install_managed_env "$rendered_oci" "$OCI_CONFIG_FILE"
   rm -f "$rendered_oci"
   oci_http_secret="$(read_existing_value "$OCI_RUNTIME_ENV_FILE" REGISTRY_HTTP_SECRET)"
   [[ -n "$oci_http_secret" ]] || oci_http_secret="$($PYTHON_BIN -c 'import secrets; print(secrets.token_urlsafe(48))')"
@@ -478,7 +613,12 @@ ARCTURUSD_STATE_DB=$OCI_AUTH_DB
 RUNNER_TOKENS_FILE=$CONFIG_DIR/tokens.json
 ARCTURUS_OCI_SIGNING_KEY=$OCI_SIGNING_KEY_FILE
 ARCTURUS_OCI_JWKS_FILE=$OCI_JWKS_FILE
-ARCTURUS_OCI_REGISTRY=127.0.0.1:$OCI_REGISTRY_PORT
+ARCTURUS_OCI_REGISTRY=${OCI_REGISTRY_HOST:-127.0.0.1:$OCI_REGISTRY_PORT}
+ARCTURUS_OCI_REGISTRY_INTERNAL=http://127.0.0.1:$OCI_REGISTRY_PORT
+ARCTURUS_OCI_EXPECTED_OS=linux
+ARCTURUS_OCI_MAX_LAYER_BYTES=$OCI_MAX_LAYER_BYTES
+ARCTURUS_OCI_MAX_ARTIFACT_BYTES=$OCI_MAX_ARTIFACT_BYTES
+ARCTURUS_OCI_MAX_CONCURRENT_VERIFICATIONS=2
 ARCTURUS_OCI_TOKEN_ISSUER=arcturusd
 ARCTURUS_OCI_TOKEN_SERVICE=arcturus-oci
 ARCTURUS_OCI_UPLOAD_TTL_SECONDS=600
@@ -505,7 +645,7 @@ EOF
   if $OCI_AUTH_ENABLED; then
     cat >>"$rendered_oci_runtime" <<EOF
 REGISTRY_AUTH=token
-REGISTRY_AUTH_TOKEN_REALM=http://127.0.0.1:9190/auth/token
+REGISTRY_AUTH_TOKEN_REALM=$([[ "$OCI_WRITABLE_ENABLED" == true ]] && printf 'https://%s/auth/token' "$OCI_REGISTRY_HOST" || printf 'http://127.0.0.1:9190/auth/token')
 REGISTRY_AUTH_TOKEN_SERVICE=arcturus-oci
 REGISTRY_AUTH_TOKEN_ISSUER=arcturusd
 REGISTRY_AUTH_TOKEN_JWKS=/etc/distribution/oci-jwks.json
@@ -620,11 +760,47 @@ if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
     echo "Arcturus OCI registry did not become ready on loopback port $OCI_REGISTRY_PORT" >&2
     exit 1
   }
+  if $OCI_WRITABLE_ENABLED; then
+    "$release_path/configure-oci-tailnet-ingress.sh" \
+      "$OCI_TAILSCALE_SERVICE" "$OCI_REGISTRY_HOST" "$OCI_REGISTRY_PORT"
+    available_bytes="$(df -PB1 "$OCI_REGISTRY_STORAGE" | awk 'NR==2 {print $4}')"
+    if [[ ! "$available_bytes" =~ ^[0-9]+$ ]] || ((available_bytes < OCI_MIN_FREE_BYTES)); then
+      echo "OCI registry needs at least $OCI_MIN_FREE_BYTES bytes free before write ingress is enabled (available: ${available_bytes:-unknown})" >&2
+      exit 1
+    fi
+
+    # Only a verified private HTTPS route and sufficient local headroom may
+    # unlock Distribution writes. Arm the EXIT guard before changing the file;
+    # normal failure or interruption restores read-only mode and restarts the
+    # registry before the installer exits.
+    oci_unlock_guard_armed=true
+    if ! set_oci_registry_read_only false; then
+      echo "failed to unlock OCI registry writes atomically" >&2
+      exit 1
+    fi
+    if ! systemctl --user restart arcturus-oci-registry.service || \
+       ! "$release_path/configure-oci-tailnet-ingress.sh" \
+          "$OCI_TAILSCALE_SERVICE" "$OCI_REGISTRY_HOST" "$OCI_REGISTRY_PORT"; then
+      echo "OCI write ingress validation failed; registry will be returned to read-only mode" >&2
+      exit 1
+    fi
+  fi
 else
   systemctl --user stop arcturus-oci-registry.service >/dev/null 2>&1 || true
   systemctl --user disable --now arcturusd.service >/dev/null 2>&1 || true
   rm -f "$OCI_QUADLET_FILE"
   systemctl --user daemon-reload
+fi
+if [[ -n "$OCI_TAILSCALE_SERVICE_TO_CLEAR" && "$OCI_TAILSCALE_SERVICE_TO_CLEAR" != "$OCI_TAILSCALE_SERVICE" ]]; then
+  if command -v tailscale >/dev/null 2>&1; then
+    # Stop advertising before removing all endpoint mappings. These commands
+    # are best-effort so a previously cleared Service does not make registry
+    # removal or an ingress rename non-idempotent.
+    tailscale serve drain "$OCI_TAILSCALE_SERVICE_TO_CLEAR" >/dev/null 2>&1 || true
+    tailscale serve clear "$OCI_TAILSCALE_SERVICE_TO_CLEAR" >/dev/null 2>&1 || true
+  else
+    echo "Warning: Tailscale Service $OCI_TAILSCALE_SERVICE_TO_CLEAR could not be cleared because the tailscale CLI is unavailable" >&2
+  fi
 fi
 if [[ -n "$BASE_DOMAIN" ]]; then
   systemctl --user enable arcturus-router.service
@@ -646,11 +822,21 @@ PY
   sudo firewall-cmd --reload
 fi
 
+
+# The write-unlock rollback guard remains armed through every installation
+# step, including router/deployer restart and optional firewall changes. Only a
+# fully successful installation may leave Distribution writable.
+oci_unlock_guard_armed=false
+
 echo "Arcturus $VERSION installed for $HOST_USER."
 echo "API readiness: curl --fail http://127.0.0.1:9090/healthz"
 if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
   if $OCI_AUTH_ENABLED; then
-    echo "OCI readiness: expect HTTP 401 and a Bearer challenge from http://127.0.0.1:$OCI_REGISTRY_PORT/v2/"
+    if $OCI_WRITABLE_ENABLED; then
+      echo "OCI readiness: expect HTTP 401 and the HTTPS token realm from https://$OCI_REGISTRY_HOST/v2/"
+    else
+      echo "OCI readiness: local authenticated registry remains read-only at http://127.0.0.1:$OCI_REGISTRY_PORT/v2/"
+    fi
   else
     echo "OCI readiness: curl --fail http://127.0.0.1:$OCI_REGISTRY_PORT/v2/"
   fi

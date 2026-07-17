@@ -16,12 +16,15 @@ This process applies to public source releases. Private host inventory and crede
 Run:
 
 ```bash
-python3 -m compileall deploy
-python3 -W error::ResourceWarning -m unittest discover -s deploy/tests -v
+python3 deploy/tests/check-version-consistency.py
+PYTHONPATH=deploy CERT_DOMAIN=example.org python3 -m compileall -q deploy
+PYTHONPATH=deploy CERT_DOMAIN=example.org python3 -W error::ResourceWarning -m unittest discover -s deploy/tests -v
+(cd rust && cargo test --locked --workspace --all-targets)
 for module in modules/bus modules/registry modules/router; do npm --prefix "$module" ci; npm --prefix "$module" run build; done
-npm --prefix modules/router test
+(cd modules/registry && node --test dist/*.test.js)
+(cd modules/router && node --test dist/*.test.js)
 for module in modules/bus modules/registry modules/router; do npm --prefix "$module" audit --audit-level=low; done
-bash -n deploy/*.sh deploy/arcturusctl
+bash -n deploy/*.sh deploy/arcturusctl deploy/tests/*.sh
 ```
 
 Run Terraform formatting/validation for compatibility modules when Terraform is installed. Build the control-plane test target with Buildah when available.
@@ -53,7 +56,8 @@ Require GitHub CI to pass from the candidate commit. Do not treat a locally pass
 - push `main` first and require all hosted validation to pass
 - create an annotated tag that exactly matches `v$(cat VERSION)`
 - push only that intended tag; never push private backup branches or bundles containing auxiliary refs
-- the tag workflow verifies `VERSION` and `CHANGELOG.md`, creates a source archive and complete Git bundle, records SHA-256 checksums, and opens a GitHub prerelease when the version contains a prerelease suffix
+- the tag workflow verifies `VERSION`, `CHANGELOG.md`, and coordinated package metadata, then builds the full test container (including locked Rust tests/builds and Node tests) before creating a source archive and complete Git bundle
+- only after those release-local gates pass does it record SHA-256 checksums and open a GitHub prerelease when the version contains a prerelease suffix
 - publish the immutable control-plane OCI bundle separately and record its digest in the release notes
 
 ## 7. v1.0 host acceptance

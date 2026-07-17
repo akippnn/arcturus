@@ -27,6 +27,7 @@ jobs:
           git apply --check "$RUNNER_TEMP/rust-oci-auth.patch"
           git apply "$RUNNER_TEMP/rust-oci-auth.patch"
           sed -i 's/ComponentName::try_from("api"\.into())/ComponentName::try_from("api".to_owned())/' rust/crates/arcturus-auth/src/lib.rs
+          sed -i 's/ArtifactUploadGrant, //' rust/bins/arcturusd/src/lib.rs
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt
       - name: Format and lock Rust workspace

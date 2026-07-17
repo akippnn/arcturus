@@ -8,6 +8,7 @@ Type=simple
 EnvironmentFile=%h/.config/arcturus/platform.env
 ExecStart=/usr/bin/node %h/.local/share/arcturus-deployer/current/modules/router/dist/index.js
 Restart=on-failure
+RestartPreventExitStatus=78
 RestartSec=3s
 NoNewPrivileges=true
 PrivateTmp=true

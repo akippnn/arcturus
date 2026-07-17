@@ -7,22 +7,56 @@ on:
       - '.github/workflows/rust-lock-bootstrap.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   lockfile:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.0 --profile minimal
-      - name: Generate dependency lock
-        working-directory: rust
-        run: cargo +1.97.0 generate-lockfile
-      - name: Upload dependency lock
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-cargo-lock
-          path: rust/Cargo.lock
-          if-no-files-found: error
-          retention-days: 1
+      - name: Generate and commit dependency lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.97.0 generate-lockfile --manifest-path rust/Cargo.toml
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/ci.yml')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace(
+              "      - name: Generate dependency lock\n        run: cargo +1.97.0 generate-lockfile\n",
+              "",
+          )
+          text = text.replace(
+              "cargo +1.97.0 clippy --workspace",
+              "cargo +1.97.0 clippy --locked --workspace",
+          )
+          text = text.replace(
+              "cargo +1.97.0 test --workspace",
+              "cargo +1.97.0 test --locked --workspace",
+          )
+          text = text.replace(
+              "      - name: Emit generated lockfile for initial bootstrap\n"
+              "        if: always()\n"
+              "        run: |\n"
+              "          echo '---BEGIN ARCTURUS CARGO LOCK---'\n"
+              "          cat Cargo.lock\n"
+              "          echo '---END ARCTURUS CARGO LOCK---'\n",
+              "",
+          )
+          path.write_text(text, encoding='utf-8')
+          PY
+          rm .github/workflows/rust-lock-bootstrap.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add rust/Cargo.lock .github/workflows/ci.yml .github/workflows/rust-lock-bootstrap.yml
+          git diff --cached --check
+          git commit -m 'build: lock Rust workspace dependencies'
+          git push origin "HEAD:${GITHUB_HEAD_REF}"

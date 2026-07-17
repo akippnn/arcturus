@@ -18,6 +18,7 @@ Arcturus documentation is organized around the current manifest-driven Quadlet a
 ## Architecture decisions
 
 - [ADR 0001: Arcturus-owned OCI ingress and Rust control plane](adr/0001-arcturus-owned-oci-ingress-and-rust-control-plane.md)
+- [OCI upload grants and token authorization](oci-upload-authorization.md) — Rust preview contracts, credentials, JWT claims, and current non-production boundary.
 
 ## Project direction
 

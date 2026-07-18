@@ -86,21 +86,22 @@ impl AppState {
             env::var("ARCTURUS_OCI_TOKEN_ISSUER").unwrap_or_else(|_| "arcturusd".to_owned());
         let audience =
             env::var("ARCTURUS_OCI_TOKEN_SERVICE").unwrap_or_else(|_| "arcturus-oci".to_owned());
-        let registry = env::var("ARCTURUS_OCI_REGISTRY")
-            .unwrap_or_else(|_| "127.0.0.1:9443".to_owned());
+        let registry =
+            env::var("ARCTURUS_OCI_REGISTRY").unwrap_or_else(|_| "127.0.0.1:9443".to_owned());
         let registry_internal = env::var("ARCTURUS_OCI_REGISTRY_INTERNAL")
             .unwrap_or_else(|_| "http://127.0.0.1:9443".to_owned());
-        let expected_os = env::var("ARCTURUS_OCI_EXPECTED_OS")
-            .unwrap_or_else(|_| "linux".to_owned());
-        let expected_architecture = env::var("ARCTURUS_OCI_EXPECTED_ARCH")
-            .unwrap_or_else(|_| match std::env::consts::ARCH {
-                "x86_64" => "amd64".to_owned(),
-                "aarch64" => "arm64".to_owned(),
-                other => other.to_owned(),
-            });
+        let expected_os =
+            env::var("ARCTURUS_OCI_EXPECTED_OS").unwrap_or_else(|_| "linux".to_owned());
+        let expected_architecture =
+            env::var("ARCTURUS_OCI_EXPECTED_ARCH").unwrap_or_else(
+                |_| match std::env::consts::ARCH {
+                    "x86_64" => "amd64".to_owned(),
+                    "aarch64" => "arm64".to_owned(),
+                    other => other.to_owned(),
+                },
+            );
         let max_layer_bytes = environment_u64("ARCTURUS_OCI_MAX_LAYER_BYTES", 536_870_912)?;
-        let max_artifact_bytes =
-            environment_u64("ARCTURUS_OCI_MAX_ARTIFACT_BYTES", 805_306_368)?;
+        let max_artifact_bytes = environment_u64("ARCTURUS_OCI_MAX_ARTIFACT_BYTES", 805_306_368)?;
         if max_artifact_bytes < max_layer_bytes {
             return Err(AuthError::Serialization(
                 "ARCTURUS_OCI_MAX_ARTIFACT_BYTES must be at least ARCTURUS_OCI_MAX_LAYER_BYTES"
@@ -108,12 +109,8 @@ impl AppState {
             )
             .into());
         }
-        let max_concurrent_verifications = environment_usize_range(
-            "ARCTURUS_OCI_MAX_CONCURRENT_VERIFICATIONS",
-            2,
-            1,
-            16,
-        )?;
+        let max_concurrent_verifications =
+            environment_usize_range("ARCTURUS_OCI_MAX_CONCURRENT_VERIFICATIONS", 2, 1, 16)?;
         let upload_ttl_seconds = env::var("ARCTURUS_OCI_UPLOAD_TTL_SECONDS")
             .unwrap_or_else(|_| "600".to_owned())
             .parse::<i64>()
@@ -235,11 +232,10 @@ async fn complete_artifact_upload(
     let store = state.grants.clone();
     let lookup_id = upload_id.clone();
     let started_at = unix_timestamp();
-    let grant = tokio::task::spawn_blocking(move || {
-        store.get_for_completion(&lookup_id, started_at)
-    })
-    .await
-    .map_err(|_| ApiFailure::internal("upload grant lookup task failed"))??;
+    let grant =
+        tokio::task::spawn_blocking(move || store.get_for_completion(&lookup_id, started_at))
+            .await
+            .map_err(|_| ApiFailure::internal("upload grant lookup task failed"))??;
     let service = grant.service.clone();
     let verifier = state.control_tokens.clone();
     tokio::task::spawn_blocking(move || verifier.authorize(&authorization, &service))

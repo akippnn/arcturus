@@ -26,11 +26,9 @@ const OCI_REVISION_LABEL: &str = "org.opencontainers.image.revision";
 const COMPONENT_QUEUE_TIMEOUT: Duration = Duration::from_secs(240);
 const COMPONENT_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(300);
 const OCI_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
-const DOCKER_INDEX_MEDIA_TYPE: &str =
-    "application/vnd.docker.distribution.manifest.list.v2+json";
+const DOCKER_INDEX_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
 const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
-const DOCKER_MANIFEST_MEDIA_TYPE: &str =
-    "application/vnd.docker.distribution.manifest.v2+json";
+const DOCKER_MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
 const OCI_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
 const DOCKER_CONFIG_MEDIA_TYPE: &str = "application/vnd.docker.container.image.v1+json";
 
@@ -336,9 +334,9 @@ impl RegistryVerifier {
                     layer.digest
                 )));
             }
-            total.checked_add(layer.size).ok_or_else(|| {
-                RegistryVerificationError::Rejected("artifact size overflow".into())
-            })
+            total
+                .checked_add(layer.size)
+                .ok_or_else(|| RegistryVerificationError::Rejected("artifact size overflow".into()))
         })?;
         if total_compressed_size > self.policy.max_artifact_bytes {
             return Err(RegistryVerificationError::Rejected(format!(
@@ -348,7 +346,9 @@ impl RegistryVerifier {
         }
 
         let config_path = format!("/v2/{repository}/blobs/{}", config.digest);
-        let (config_body, _) = self.fetch_bytes(&config_path, token, MAX_CONFIG_BYTES).await?;
+        let (config_body, _) = self
+            .fetch_bytes(&config_path, token, MAX_CONFIG_BYTES)
+            .await?;
         verify_descriptor_bytes(&config_body, &config, "image config")?;
         verify_image_config(
             &config_body,
@@ -447,8 +447,8 @@ impl RegistryVerifier {
         let mut remaining = length - response.body_prefix.len() as u64;
         let mut buffer = [0_u8; 64 * 1024];
         while remaining > 0 {
-            let requested = usize::try_from(remaining.min(buffer.len() as u64))
-                .unwrap_or(buffer.len());
+            let requested =
+                usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
             let read = response
                 .stream
                 .read(&mut buffer[..requested])
@@ -592,9 +592,7 @@ impl RegistryVerifier {
     }
 }
 
-fn ensure_index_descriptor_count(
-    descriptor_count: usize,
-) -> Result<(), RegistryVerificationError> {
+fn ensure_index_descriptor_count(descriptor_count: usize) -> Result<(), RegistryVerificationError> {
     if descriptor_count > MAX_INDEX_DESCRIPTORS {
         Err(RegistryVerificationError::Rejected(format!(
             "manifest index contains {descriptor_count} descriptors; maximum is {MAX_INDEX_DESCRIPTORS}"

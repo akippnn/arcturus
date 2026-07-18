@@ -321,7 +321,10 @@ impl GrantStore {
             columns.iter().any(|column| column == "completed_at")
         };
         if !has_completed_at {
-            connection.execute("ALTER TABLE upload_grants ADD COLUMN completed_at INTEGER", [])?;
+            connection.execute(
+                "ALTER TABLE upload_grants ADD COLUMN completed_at INTEGER",
+                [],
+            )?;
         }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -573,10 +576,7 @@ impl GrantStore {
     }
 }
 
-fn load_grant(
-    connection: &Connection,
-    upload_id: &str,
-) -> Result<Option<StoredGrant>, AuthError> {
+fn load_grant(connection: &Connection, upload_id: &str) -> Result<Option<StoredGrant>, AuthError> {
     let row = connection
         .query_row(
             "SELECT id,username,service,revision,repositories_json,expires_at,completed_at \n             FROM upload_grants WHERE id=? AND revoked_at IS NULL",
@@ -643,15 +643,13 @@ fn validate_completion_shape(
                 artifact.component, artifact.repository
             )));
         }
-        let submitted = request
-            .components
-            .get(&artifact.component)
-            .ok_or_else(|| {
-                AuthError::CompletionMismatch("verified component was not submitted".into())
-            })?;
+        let submitted = request.components.get(&artifact.component).ok_or_else(|| {
+            AuthError::CompletionMismatch("verified component was not submitted".into())
+        })?;
         if submitted.digest != artifact.manifest_digest {
             return Err(AuthError::CompletionMismatch(format!(
-                "verified digest does not match component {}", artifact.component
+                "verified digest does not match component {}",
+                artifact.component
             )));
         }
     }
@@ -721,9 +719,8 @@ fn load_completion(
                 Ok(ArtifactLayerReceipt {
                     digest: Sha256Digest::try_from(layer.0)
                         .map_err(|error| AuthError::InvalidStoredState(error.to_string()))?,
-                    size: u64::try_from(layer.1).map_err(|_| {
-                        AuthError::InvalidStoredState("negative layer size".into())
-                    })?,
+                    size: u64::try_from(layer.1)
+                        .map_err(|_| AuthError::InvalidStoredState("negative layer size".into()))?,
                     media_type: layer.2,
                 })
             })
@@ -1054,7 +1051,7 @@ pub fn authorized_access(
 mod tests {
     use super::*;
     use arcturus_contracts::{
-        ArtifactLayerReceipt, ArtifactUploadComponentCompletion, ArtifactUploadCompletionRequest,
+        ArtifactLayerReceipt, ArtifactUploadCompletionRequest, ArtifactUploadComponentCompletion,
         ArtifactUploadRequest, ComponentName, Revision, ServiceName, Sha256Digest,
     };
     use tempfile::TempDir;
@@ -1256,7 +1253,10 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(verification_claims.exp, 1_700_000_599 + VERIFICATION_TOKEN_SECONDS);
+        assert_eq!(
+            verification_claims.exp,
+            1_700_000_599 + VERIFICATION_TOKEN_SECONDS
+        );
         assert_eq!(verification_claims.access[0].actions, ["pull"]);
     }
 

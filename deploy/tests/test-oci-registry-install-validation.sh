@@ -236,7 +236,7 @@ grep -Fq '"$OCI_TAILSCALE_SERVICE_TO_CLEAR" != "$OCI_TAILSCALE_SERVICE"' \
   "$root/deploy/install-host.sh"
 grep -Fq 'OCI_AUTH_STATE_DIR="$ARCTURUS_PATH_OCI_AUTH_STATE_DIR"' \
   "$root/deploy/install-host.sh"
-grep -Fq 'ReadWritePaths="@OCI_AUTH_STATE_DIR@"' \
+grep -Fq 'ReadWritePaths=-"@OCI_AUTH_STATE_DIR@" -"@FLEET_STATE_DIR@" "@RUNTIME_DIR@"' \
   "$root/deploy/arcturusd.service"
 ! grep -Fq 'ReadWritePaths=%h/' \
   "$root/deploy/arcturusd.service"

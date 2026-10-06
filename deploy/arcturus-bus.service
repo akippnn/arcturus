@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-EnvironmentFile="@CONFIG_DIR@/platform.env"
+EnvironmentFile=@CONFIG_DIR@/platform.env
 ExecStartPre=/usr/bin/mkdir -p "@RUNTIME_DIR@"
 ExecStart=/usr/bin/node "@STATE_DIR@/current/modules/bus/dist/index.js"
 Restart=on-failure

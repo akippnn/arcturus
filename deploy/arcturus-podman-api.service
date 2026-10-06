@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=-"@CONFIG_DIR@/registry.env"
+EnvironmentFile=-@CONFIG_DIR@/registry.env
 ExecStartPre=/usr/bin/mkdir -p "@RUNTIME_DIR@"
 ExecStart=/usr/bin/podman system service --time=0 "unix://@RUNTIME_DIR@/podman.sock"
 ExecStopPost=/usr/bin/rm -f "@RUNTIME_DIR@/podman.sock"

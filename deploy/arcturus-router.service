@@ -5,7 +5,7 @@ Wants=arcturus-registry.service
 
 [Service]
 Type=simple
-EnvironmentFile="@CONFIG_DIR@/platform.env"
+EnvironmentFile=@CONFIG_DIR@/platform.env
 ExecStart=/usr/bin/node "@STATE_DIR@/current/modules/router/dist/index.js"
 Restart=on-failure
 RestartPreventExitStatus=78

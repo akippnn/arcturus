@@ -1,0 +1,94 @@
+{
+  "capturedDate": "2026-10-06 Asia/Manila",
+  "scope": "single AlmaLinux ARM64 engineering trial, not full DIST-001 hardware acceptance",
+  "host": "aki@hori",
+  "os": "AlmaLinux 10.2 aarch64",
+  "results": {
+    "workerId": "hori-pi5-arm64",
+    "workloadName": "dist-redis-client",
+    "deploymentId": "5b6bb536-13db-4bf8-a475-d28f6e38b8d2",
+    "assignmentGeneration": 1,
+    "releaseDigest": "sha256:9482f48e366e6a033adf936302bcd6778ee3271e8be587f778345892c5cd5a9f",
+    "recoverySeconds": 5.13,
+    "containerBefore": {
+      "id": "6a0bdf6818222675b427ac7e492bc8dc021b51538ca8b294f1a88f7c774ce317",
+      "state": "running",
+      "health": "healthy"
+    },
+    "containerAfterRecovery": {
+      "id": "1f747a3512b4c07bf824361a8e542cc7afac09a1376d88a397cda4793763b5b6",
+      "state": "running",
+      "health": "healthy"
+    },
+    "containerDuringOutage": {
+      "id": "1f747a3512b4c07bf824361a8e542cc7afac09a1376d88a397cda4793763b5b6",
+      "state": "running",
+      "health": "healthy"
+    },
+    "controlPlaneOutageSeconds": 20,
+    "agentRestartedDuringOutage": true,
+    "freshObservationAfterOutage": {
+      "assignmentGeneration": 1,
+      "deploymentId": "5b6bb536-13db-4bf8-a475-d28f6e38b8d2",
+      "observationSequence": 30,
+      "observedAt": 1791221555,
+      "phase": "healthy",
+      "releaseDigest": "sha256:9482f48e366e6a033adf936302bcd6778ee3271e8be587f778345892c5cd5a9f",
+      "routingStatus": "not_applicable",
+      "units": {
+        "arcturus-dist-redis-client-client.service": "active"
+      },
+      "workerId": "hori-pi5-arm64",
+      "workloadName": "dist-redis-client"
+    },
+    "results": {
+      "recovery": "pass",
+      "outage": "pass",
+      "resp": "pass"
+    },
+    "ramMount": "tmpfs rw,nosuid,nodev,relatime,seclabel,size=524288k,mode=700,uid=1000,gid=1000,noswap",
+    "podmanStorage": "/run/user/1000/arcturus/trial/podman-store /run/user/1000/arcturus/trial/podman-run",
+    "rootfulContainers": "4ce623132c9a alyssaqt-discord-bot Up 17 hours\n7c2422fa3983 yui-discord-bot Up 17 hours\n97cd65a7f170 seamplify-backend Up 11 hours"
+  },
+  "artifactIdentity": {
+    "role": "single-Pi engineering package; not release candidate",
+    "builtFromArchiveSha256": "b8b2a46068472d21e9742f5ff11dc14d6b113acaea24d3af3ea8a8ef0b5d36cd",
+    "installedVersion": "dist001-engineering-b8b2a4606847-units2",
+    "subsequentServiceTemplateFixes": {
+      "deploy/arcturus-agent.service": "57ab519713dfa9a0a391f5d17e277ba847f15f7ec37b8f51164f1b4888abb67c",
+      "deploy/arcturus-bus.service": "7d964e5dcf41a319231ee289a1056ce0ec32f49c5136832b348892a0fb67f822",
+      "deploy/arcturus-deployer@.service": "f3ecdef39f595d1792fff30031d36103b1d9fbcd92ebd964cebb767adad53307",
+      "deploy/arcturus-podman-api.service": "ee6baa25cf89f64f8a89aff29ce4b020f140f42b3373b4cd01ff16e761feb6b4",
+      "deploy/arcturus-registry.service": "4684e660ec03cc3d132fdcad9f839d53f1e63e793538bd44653fb5774903bd4b",
+      "deploy/arcturus-router.service": "4269f3319e8d7f8dbf6035a1338fd368c3fadb2fdbb53c5998ee3161ad693a8e",
+      "deploy/arcturusd.service": "7bee5d2d92536912d3a1fef79f8deb2f1d6a1b432e913765beb23c685b1ebc64"
+    },
+    "packageSha256": "a72ad538aa74843f2a25ab43a522c2cff89b58a15bbea115122894c94dce5b69",
+    "binaries": {
+      "arcturusd": "79ce923f1e8673ac2ce28a7466f98db475ddc950139c69f5eed279d76b2469ce",
+      "arcturus-agent": "bf5d567333ad6b0ab3befd04a32b04637760ba4b83bd8a868847e6b3cffff453"
+    },
+    "pythonWheelsIncluded": false,
+    "privateSQLiteIntegrity": {
+      "agent.sqlite3": "ok",
+      "fleet.sqlite3": "ok",
+      "lifecycle.sqlite3": "ok"
+    }
+  },
+  "blueprintBaseRevision": "fa7ea27cdd17a0bb581987866f9e4b2957f1576c",
+  "blueprintTemplateSha256": "9548d73c69542ea7e234cbe21df75020caa521508ab8c2c5e101bb331a086769",
+  "redisImageIndex": "docker.io/library/redis@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0",
+  "providerScope": "ephemeral manually managed local Redis, imported resource identity only",
+  "remaining": [
+    "second worker unavailable",
+    "AlmaLinux AMD64 execution",
+    "physical target-first movement",
+    "existing external Redis/Valkey endpoint",
+    "owner acceptance"
+  ],
+  "observedRamMiB": 209,
+  "ramLimitMiB": 512,
+  "observedAvailableMemoryGiB": 6.6,
+  "swapUsedBytes": 0,
+  "rebootBehavior": "trial units remain stopped until required tmpfs state is restored"
+}

@@ -48,4 +48,5 @@ owns the DIST-001 requirements; this overview does not restate them.
 - [Approved contract](contract-v1alpha1.md)
 - [Physical runbook](runbook.md)
 - [Source implementation evidence](evidence/source-implementation.md)
+- [Hori ARM64 RAM trial evidence](evidence/hori-arm64-ram-20261006.md)
 - [Machine-readable state](manifest.yaml)

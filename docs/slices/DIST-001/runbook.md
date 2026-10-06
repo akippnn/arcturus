@@ -36,10 +36,19 @@ arcturusctl token create \
   --output "$config_dir/fleet-operator.token"
 ```
 
+The extracted bundle must contain `deploy/` and its sibling `modules/`. Pass
+`deploy/` as `--source-dir`; the installer requires an existing vhosts directory
+even when routing is disabled. Create it before either installation:
+
+```console
+mkdir -p "$HOME/.local/share/arcturus/vhosts"
+```
+
 Install or update a dedicated fleet control plane on a private or tailnet IP:
 
 ```console
-deploy/install-host.sh --source-dir /path/to/unpacked-arcturus-bundle \
+deploy/install-host.sh --source-dir /path/to/unpacked-arcturus-bundle/deploy \
+  --vhosts-dir "$HOME/.local/share/arcturus/vhosts" \
   --enable-fleet-control-plane \
   --fleet-listen-address 100.64.0.10
 ```
@@ -89,7 +98,8 @@ arcturusctl token create \
 Then install the outbound agent, substituting that worker's ID and credential:
 
 ```console
-deploy/install-host.sh --source-dir /path/to/unpacked-arcturus-bundle \
+deploy/install-host.sh --source-dir /path/to/unpacked-arcturus-bundle/deploy \
+  --vhosts-dir "$HOME/.local/share/arcturus/vhosts" \
   --enable-worker-agent \
   --worker-id pi-arm64 \
   --control-plane-url http://100.64.0.10:9190 \
@@ -174,3 +184,45 @@ release digests, container recovery timing, `PONG` evidence, and the movement
 phase ordering in a new immutable file under `evidence/` before requesting
 owner acceptance. Add that file to `manifest.yaml` and point the hardware gate
 to it.
+
+## Single-Pi engineering trial and SD write reduction
+
+The 2026-10-06 Hori trial verified one AlmaLinux ARM64 worker, RESP binding,
+container recovery, and continued operation during a control-plane outage.
+The second worker and cross-architecture movement remain pending. See
+[evidence](evidence/hori-arm64-ram-20261006.md) for exact scope and artifacts.
+
+Build Linux ARM64 artifacts on the laptop. For the bounded Pi trial, fleet,
+agent, and lifecycle databases; active manifests; rootless Podman graph/run
+storage; and staging logs use `/run/user/1000/arcturus/trial`, a dedicated
+512 MiB tmpfs mounted with `noswap`. The verified memory headroom was more
+than 6 GiB. Journald was already using `/run/log/journal`. This reduces trial
+SD writes; it is not evidence of the card's remaining lifespan. Production
+rootful containers keep their existing storage and services.
+
+This configuration is volatile. The user-unit drop-in
+`~/.config/systemd/user/arcturus-.service.d/20-volatile-trial.conf` and
+`~/.config/systemd/user/arcturusd.service.d/20-volatile-trial.conf` require
+the mount, so Arcturus trial units remain stopped after a reboot until RAM
+state is restored. Do not rerun the original migration script blindly: it
+refuses existing backups and rootless storage configuration.
+
+Before stopping or rebooting Hori, take consistent SQLite backups using the
+SQLite backup API and copy them to the laptop. The captured laptop checkpoint
+contains fleet, agent, and lifecycle databases in a private directory; keep
+these out of Git and public evidence. Restoring requires mounting tmpfs with
+the same owner and options, restoring all three databases to their configured
+paths, rebuilding the rootless network/provider/secret/image store, and
+restoring active manifests from the matching deployment. Verify local release
+identity before starting trial units. Credentials remain in the mode-0600
+Pi configuration files.
+
+For rollback to the pre-trial SD state, stop only the rootless trial units
+and containers first. Preserve a new private checkpoint, restore the four
+`~/.config/arcturus/*.env.pre-ram-checkpoint` files to their original `.env`
+paths, archive the trial `~/.config/containers/storage.conf` (there was no
+prior file), and archive both volatile-trial drop-ins. Restore the staging path
+from `~/.cache/arcturus-dist001-20261005-sd-checkpoint`, then reload the user
+manager. The original rootless storage and pre-trial databases remain on SD;
+they predate the successful RAM workload. Reconcile deliberately before
+starting any workload. Do not replace rootful production storage.

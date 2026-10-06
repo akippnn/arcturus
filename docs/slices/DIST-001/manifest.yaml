@@ -11,12 +11,14 @@ gates:
   DIST-001-CONTRACT:
     applicability: required
     state: pass
-    summary: Rust contracts and Python-derived characteristics agree on canonical fixtures.
+    summary: Rust contracts and Python-derived characteristics agree on canonical
+      fixtures.
     evidence: evidence/source-implementation.md
   DIST-001-ORDER:
     applicability: required
     state: pass
-    summary: Assignment ordering, conflicts, plural state, restart, and tombstones are deterministic.
+    summary: Assignment ordering, conflicts, plural state, restart, and tombstones
+      are deterministic.
     evidence: evidence/source-implementation.md
   DIST-001-ISOLATION:
     applicability: required
@@ -31,22 +33,25 @@ gates:
   DIST-001-PLACE:
     applicability: required
     state: pass
-    summary: Hard eligibility and refusal reasons are observable without pressure eviction.
+    summary: Hard eligibility and refusal reasons are observable without pressure
+      eviction.
     evidence: evidence/source-implementation.md
   DIST-001-MOVE:
     applicability: required
     state: pass
-    summary: Exact target health precedes source removal and target failure preserves the source.
+    summary: Exact target health precedes source removal and target failure preserves
+      the source.
     evidence: evidence/source-implementation.md
   DIST-001-OUTAGE:
     applicability: required
     state: pass
     summary: Cached healthy workloads continue without the control plane.
-    evidence: evidence/source-implementation.md
+    evidence: evidence/hori-arm64-ram-20261006.md
   DIST-001-CLI:
     applicability: required
     state: pass
-    summary: Fleet enrollment, resources, placement, diagnostics, and movement use arcturusctl.
+    summary: Fleet enrollment, resources, placement, diagnostics, and movement use
+      arcturusctl.
     evidence: evidence/source-implementation.md
   DIST-001-PATHS:
     applicability: required
@@ -56,13 +61,17 @@ gates:
   DIST-001-HARDWARE:
     applicability: required
     state: pending
-    summary: Complete the two-worker arm64 and amd64 owner procedure with imported Redis.
+    summary: Complete the two-worker arm64 and amd64 owner procedure with imported
+      Redis.
     evidence: null
-blocker: Physical arm64 and amd64 workers, a runnable multi-architecture image, and an imported Redis endpoint are required.
+blocker: Single AlmaLinux ARM64 worker passed recovery and outage in RAM; AlmaLinux
+  AMD64 execution, two-worker movement, the existing external Redis/Valkey provider,
+  and owner acceptance remain pending.
 next_gate: DIST-001-HARDWARE
 links:
   overview: README.md
   contract: contract-v1alpha1.md
   runbook: runbook.md
   evidence:
-    - evidence/source-implementation.md
+  - evidence/source-implementation.md
+  - evidence/hori-arm64-ram-20261006.md

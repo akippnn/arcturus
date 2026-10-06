@@ -30,12 +30,31 @@ shift
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_INSTALLER="$SELF_DIR/install-host.sh"
-CONFIG_DIR="${ARCTURUS_CONFIG_DIR:-$HOME/.config/arcturus}"
-STATE_DIR="${ARCTURUS_STATE_DIR:-$HOME/.local/share/arcturus-deployer}"
+PATHS_HELPER="$SELF_DIR/arcturus_paths.py"
+if [[ -f "$PATHS_HELPER" ]]; then
+  eval "$(python3 "$PATHS_HELPER" --home "$HOME" --uid "$(id -u)" --format shell)"
+  CONFIG_DIR="$ARCTURUS_PATH_CONFIG_DIR"
+  STATE_DIR="$ARCTURUS_PATH_DEPLOYER_STATE_DIR"
+  BIN_DIR="$ARCTURUS_PATH_BIN_DIR"
+else
+  echo "Arcturus path resolver is missing beside updater: $PATHS_HELPER" >&2
+  exit 2
+fi
+LAYOUT_FILE="$SELF_DIR/arcturus-layout.json"
+if [[ -f "$LAYOUT_FILE" ]]; then
+  eval "$(python3 - "$LAYOUT_FILE" <<'PY'
+import json, shlex, sys
+value = json.load(open(sys.argv[1], encoding='utf-8'))
+for key in ('CONFIG_DIR', 'STATE_DIR', 'BIN_DIR'):
+    print(f'{key}={shlex.quote(value[key])}')
+PY
+)"
+fi
 STATE_FILE="$CONFIG_DIR/host-install.json"
 HISTORY_FILE="$STATE_DIR/host-install-history.jsonl"
-BIN_DIR="${ARCTURUS_BIN_DIR:-$HOME/.local/bin}"
 TARGET_SELF="$BIN_DIR/arcturus-host-update"
+TARGET_PATHS_HELPER="$BIN_DIR/arcturus_paths.py"
+TARGET_LAYOUT_FILE="$BIN_DIR/arcturus-layout.json"
 INSTALLER=""
 BUNDLE=""
 SOURCE_DIR=""
@@ -67,18 +86,77 @@ extract_value() {
   return 1
 }
 
+resolve_forwarded_layout() {
+  local config_root data_root cache_root runtime_root bin_dir workload_root resolved_home
+  local previous_config_dir="$CONFIG_DIR" previous_state_dir="$STATE_DIR"
+  resolved_home="$(extract_value --host-home "${FORWARDED[@]}" || true)"
+  [[ -n "$resolved_home" ]] || resolved_home="$HOME"
+  config_root="$(extract_value --config-root "${FORWARDED[@]}" || true)"
+  data_root="$(extract_value --data-root "${FORWARDED[@]}" || true)"
+  cache_root="$(extract_value --cache-root "${FORWARDED[@]}" || true)"
+  runtime_root="$(extract_value --runtime-root "${FORWARDED[@]}" || true)"
+  bin_dir="$(extract_value --bin-dir "${FORWARDED[@]}" || true)"
+  workload_root="$(extract_value --workload-root "${FORWARDED[@]}" || true)"
+  local path_environment=(env HOME="$resolved_home")
+  [[ -z "$config_root" ]] || path_environment+=(ARCTURUS_CONFIG_ROOT="$config_root")
+  [[ -z "$data_root" ]] || path_environment+=(ARCTURUS_DATA_ROOT="$data_root")
+  [[ -z "$cache_root" ]] || path_environment+=(ARCTURUS_CACHE_ROOT="$cache_root")
+  [[ -z "$runtime_root" ]] || path_environment+=(ARCTURUS_RUNTIME_ROOT="$runtime_root")
+  [[ -z "$bin_dir" ]] || path_environment+=(ARCTURUS_BIN_DIR="$bin_dir")
+  [[ -z "$workload_root" ]] || path_environment+=(ARCTURUS_WORKLOAD_ROOT="$workload_root")
+  eval "$("${path_environment[@]}" python3 "$PATHS_HELPER" --home "$resolved_home" --uid "$(id -u)" --format shell)"
+  CONFIG_DIR="$ARCTURUS_PATH_CONFIG_DIR"
+  STATE_DIR="$ARCTURUS_PATH_DEPLOYER_STATE_DIR"
+  BIN_DIR="$ARCTURUS_PATH_BIN_DIR"
+  if [[ "$previous_config_dir" != "$CONFIG_DIR" \
+        && -e "$previous_config_dir/host-install.json" \
+        && ! -e "$CONFIG_DIR/host-install.json" ]]; then
+    cat >&2 <<EOF
+Refusing to abandon the recorded Arcturus configuration during a root change.
+  existing: $previous_config_dir
+  selected: $CONFIG_DIR
+Stop Arcturus, copy the configuration with metadata preserved, verify it at the
+selected path, and rerun bootstrap. See docs/filesystem-layout.md.
+EOF
+    exit 2
+  fi
+  if [[ "$previous_state_dir" != "$STATE_DIR" \
+        && -e "$previous_state_dir/host-install-history.jsonl" \
+        && ! -e "$STATE_DIR/host-install-history.jsonl" ]]; then
+    cat >&2 <<EOF
+Refusing to abandon the recorded Arcturus update history during a root change.
+  existing: $previous_state_dir
+  selected: $STATE_DIR
+Stop Arcturus, copy the persistent state with metadata preserved, verify it at
+the selected path, and rerun bootstrap. See docs/filesystem-layout.md.
+EOF
+    exit 2
+  fi
+  STATE_FILE="$CONFIG_DIR/host-install.json"
+  HISTORY_FILE="$STATE_DIR/host-install-history.jsonl"
+  TARGET_SELF="$BIN_DIR/arcturus-host-update"
+  TARGET_PATHS_HELPER="$BIN_DIR/arcturus_paths.py"
+  TARGET_LAYOUT_FILE="$BIN_DIR/arcturus-layout.json"
+}
+
 persistable_args_json() {
   python3 - "${FORWARDED[@]}" <<'PY'
 import json, sys
 args = sys.argv[1:]
 value_options = {
-    '--host-user', '--host-home', '--listen-address', '--runner-cidr',
+    '--host-user', '--host-home', '--config-root', '--data-root', '--cache-root',
+    '--runtime-root', '--bin-dir', '--workload-root', '--listen-address', '--runner-cidr',
     '--allowed-bind-root', '--network', '--vhosts-dir', '--nginx-container',
-    '--base-domain', '--cert-domain', '--container-cli',
+    '--base-domain', '--cert-domain', '--container-cli', '--legacy-v1-mode',
     '--oci-registry-image', '--oci-registry-port', '--oci-registry-storage',
     '--oci-registry-host', '--oci-tailscale-service',
+    '--fleet-listen-address', '--control-plane-url', '--worker-id', '--worker-token-file',
 }
-flag_options = {'--configure-firewall', '--enable-oci-auth', '--disable-oci-auth', '--disable-oci-registry'}
+flag_options = {
+    '--configure-firewall', '--enable-oci-auth', '--disable-oci-auth', '--disable-oci-registry',
+    '--enable-fleet-control-plane', '--enable-worker-agent', '--allow-legacy-nginx-extras',
+    '--allow-legacy-mutable-main', '--disallow-legacy-mutable-main',
+}
 transient_value = {'--bundle', '--source-dir', '--version'}
 transient_flags = {'--validate-only', '--dry-run', '--force-config'}
 out = []
@@ -137,13 +215,14 @@ resolve_installer() {
   CONTAINER_ID="$(podman create "$BUNDLE")"
   podman cp "$CONTAINER_ID:/opt/arcturus/deploy/install-host.sh" "$TEMP_DIR/install-host.sh"
   podman cp "$CONTAINER_ID:/opt/arcturus/deploy/arcturus-host-update" "$TEMP_DIR/arcturus-host-update"
-  chmod 0755 "$TEMP_DIR/install-host.sh" "$TEMP_DIR/arcturus-host-update"
+  podman cp "$CONTAINER_ID:/opt/arcturus/deploy/arcturus_paths.py" "$TEMP_DIR/arcturus_paths.py"
+  chmod 0755 "$TEMP_DIR/install-host.sh" "$TEMP_DIR/arcturus-host-update" "$TEMP_DIR/arcturus_paths.py"
   INSTALLER="$TEMP_DIR/install-host.sh"
   SELF_SOURCE="$TEMP_DIR/arcturus-host-update"
 }
 
 install_self() {
-  local source="$SELF_SOURCE" desired current managed backup
+  local source="$SELF_SOURCE" helper_source desired current managed backup
   mkdir -p "$BIN_DIR" "$CONFIG_DIR"
   desired="$(sha256sum "$source" | cut -d' ' -f1)"
   current=""; [[ -f "$TARGET_SELF" ]] && current="$(sha256sum "$TARGET_SELF" | cut -d' ' -f1)"
@@ -173,6 +252,25 @@ PY
     echo "Replaced locally modified arcturus-host-update; backup: $backup" >&2
   fi
   UPDATER_SHA256="$(sha256sum "$TARGET_SELF" | cut -d' ' -f1)"
+  helper_source="$(dirname "$source")/arcturus_paths.py"
+  [[ -f "$helper_source" ]] || {
+    echo "Path resolver is missing beside updater: $helper_source" >&2
+    exit 2
+  }
+  if [[ "$helper_source" != "$TARGET_PATHS_HELPER" ]]; then
+    install -m 0755 "$helper_source" "$TARGET_PATHS_HELPER"
+  fi
+  CONFIG_DIR="$CONFIG_DIR" STATE_DIR="$STATE_DIR" BIN_DIR="$BIN_DIR" \
+    TARGET_LAYOUT_FILE="$TARGET_LAYOUT_FILE" python3 - <<'PY'
+import json, os
+path = os.environ['TARGET_LAYOUT_FILE']
+temporary = path + '.new'
+with open(temporary, 'w', encoding='utf-8') as handle:
+    json.dump({key: os.environ[key] for key in ('CONFIG_DIR', 'STATE_DIR', 'BIN_DIR')}, handle, indent=2)
+    handle.write('\n')
+os.chmod(temporary, 0o600)
+os.replace(temporary, path)
+PY
 }
 
 record_state() {
@@ -250,6 +348,7 @@ case "$MODE" in
     BUNDLE="$(extract_value --bundle "${FORWARDED[@]}" || true)"
     SOURCE_DIR="$(extract_value --source-dir "${FORWARDED[@]}" || true)"
     [[ -n "$BUNDLE" || -n "$SOURCE_DIR" ]] || SOURCE_DIR="$(cd "$SELF_DIR" && pwd)"
+    resolve_forwarded_layout
     resolve_installer
     install_args_json="$(persistable_args_json)"
     "$INSTALLER" "${FORWARDED[@]}"

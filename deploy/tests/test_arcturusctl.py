@@ -1,11 +1,20 @@
 import json
+import io
 import tempfile
 import unittest
 from unittest.mock import patch
 from argparse import Namespace
 from pathlib import Path
 
-from arcturusctl import command_project_preflight, command_project_render, load_project
+from arcturusctl import (
+    api_request,
+    arcturus_config_dir,
+    build_parser,
+    command_fleet_service_apply,
+    command_project_preflight,
+    command_project_render,
+    load_project,
+)
 from pydantic import ValidationError
 
 
@@ -84,6 +93,28 @@ class ProjectConfigurationTests(unittest.TestCase):
         path = root / ".arcturus" / "project.json"
         path.write_text(json.dumps(project()))
         return path
+
+    def test_fleet_cli_defaults_follow_the_central_config_root(self):
+        with patch.dict(
+            "os.environ",
+            {"ARCTURUS_CONFIG_ROOT": "/etc", "ARCTURUS_FLEET_TOKEN_FILE": ""},
+            clear=False,
+        ):
+            self.assertEqual(arcturus_config_dir(), Path("/etc/arcturus"))
+            args = build_parser().parse_args(["fleet", "worker", "list"])
+            self.assertEqual(args.token_file, "/etc/arcturus/fleet-operator.token")
+
+    def test_api_request_accepts_list_responses_used_by_fleet_list_commands(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token = Path(temp_dir) / "operator.token"
+            token.write_text("secret\n")
+            args = Namespace(
+                api_url="http://127.0.0.1:9190",
+                token_file=str(token),
+                timeout=1,
+            )
+            with patch("arcturusctl.urllib.request.urlopen", return_value=io.BytesIO(b"[]")):
+                self.assertEqual(api_request(args, "GET", "/v1/fleet/workers"), [])
 
     def test_shared_build_and_fixed_components_validate(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -169,7 +200,7 @@ class ProjectConfigurationTests(unittest.TestCase):
             }
             path.write_text(json.dumps(value))
             with patch("arcturusctl.api_request", return_value={
-                "status": "ok", "version": "1.0.0-rc.2",
+                "status": "ok", "version": "4.0.0-alpha.1",
                 "features": ["authenticated-preflight", "legacy-compose-handoff"],
             }):
                 with self.assertRaisesRegex(SystemExit, "manifest-v1-safe-routing-mirror"):
@@ -211,7 +242,7 @@ class ProjectConfigurationTests(unittest.TestCase):
             responses = [
                 {
                     "status": "ok",
-                    "version": "1.0.0-rc.2",
+                    "version": "4.0.0-alpha.1",
                     "features": ["authenticated-preflight", "legacy-compose-handoff"],
                 },
                 {"status": "ready"},
@@ -221,6 +252,19 @@ class ProjectConfigurationTests(unittest.TestCase):
                     project=str(path), api_url=None, token_file=None, timeout=10
                 ))
             self.assertEqual(request.call_count, 2)
+
+    def test_fleet_apply_derives_release_characteristics_before_submission(self):
+        repository = Path(__file__).resolve().parents[2]
+        fixture = repository / "rust/fixtures/fleet/workload-intent.json"
+        with patch("arcturusctl.api_request", return_value={"status": "placed"}) as request:
+            command_fleet_service_apply(Namespace(
+                intent=str(fixture), api_url="http://127.0.0.1:9190",
+                token_file="fleet.token", timeout=10,
+            ))
+        _, path, payload = request.call_args.args[1:]
+        self.assertEqual(path, "/v1/fleet/workloads/dist-redis-client")
+        self.assertEqual(payload["releaseDigest"], payload["releaseCharacteristics"]["releaseDigest"])
+        self.assertEqual(payload["releaseCharacteristics"]["secretUses"][0]["secretName"], "dist-redis-url")
 
 
 if __name__ == "__main__":

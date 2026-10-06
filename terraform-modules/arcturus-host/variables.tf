@@ -27,3 +27,39 @@ variable "allowed_bind_roots" {
   type        = list(string)
   default     = []
 }
+
+variable "config_root" {
+  description = "Optional absolute Arcturus/XDG configuration root."
+  type        = string
+  default     = ""
+}
+
+variable "data_root" {
+  description = "Optional absolute Arcturus/XDG persistent-data root."
+  type        = string
+  default     = ""
+}
+
+variable "cache_root" {
+  description = "Optional absolute Arcturus/XDG cache root."
+  type        = string
+  default     = ""
+}
+
+variable "runtime_root" {
+  description = "Optional absolute Arcturus/XDG runtime root."
+  type        = string
+  default     = ""
+}
+
+variable "bin_dir" {
+  description = "Optional absolute directory for installed Arcturus commands."
+  type        = string
+  default     = ""
+}
+
+variable "workload_root" {
+  description = "Optional absolute legacy/source workload root."
+  type        = string
+  default     = ""
+}

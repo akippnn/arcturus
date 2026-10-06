@@ -145,20 +145,33 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
         self.assertIn("findmnt -nr -S LABEL=CIDATA", content)
         self.assertNotIn("/boot/arcturus-firstboot.sh", content)
 
-    def test_firstboot_uses_host_inputs_and_staged_bundle(self):
+    def test_firstboot_uses_runtime_inputs_and_seed_relative_tokens(self):
         bundle = f"registry.example/arcturus@sha256:{'b' * 64}"
         content = provision.render_firstboot(
             host_user="svcuser",
-            hostname="edge-a",
+            worker_id="edge-a",
+            control_plane_url="https://fleet.example:9190",
             bundle=bundle,
             bundle_delivery="staged",
             allowed_bind_roots=["/srv/apps"],
+            service_tokens=["game-server"],
             registry_auth=True,
+            layout_args=[
+                "--config-root", "/srv/arcturus/config",
+                "--data-root", "/srv/arcturus/data",
+                "--cache-root", "/srv/arcturus/cache",
+            ],
+            config_root="/srv/arcturus/config",
         )
         self.assertIn("--source-dir /var/lib/arcturus-firstboot/payload/arcturus/deploy", content)
         self.assertNotIn(f"--bundle {bundle}", content)
-        self.assertNotIn("--enable-worker-agent", content)
+        self.assertIn("--worker-id edge-a", content)
+        self.assertIn('"$seed/.arcturus-lifecycle-game-server.token"', content)
         self.assertIn("--allowed-bind-root /srv/apps", content)
+        self.assertIn("--config-root /srv/arcturus/config", content)
+        self.assertIn("--data-root /srv/arcturus/data", content)
+        self.assertIn('target_config_root=/srv/arcturus/config', content)
+        self.assertIn('install -m 0755 "$seed/arcturus_paths.py"', content)
         self.assertIn(".arcturus-registry-auth.json", content)
         self.assertIn('host_home="$(getent passwd', content)
         self.assertNotIn("/home/svcuser", content)
@@ -177,10 +190,12 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
     def test_firstboot_installs_tailscale_without_enabling_tailscale_ssh_by_default(self):
         content = provision.render_firstboot(
             host_user="svcuser",
-            hostname="edge-a",
+            worker_id="edge-a",
+            control_plane_url="https://fleet.example:9190",
             bundle=f"registry.example/arcturus@sha256:{'b' * 64}",
             bundle_delivery="first-boot-pull",
             allowed_bind_roots=[],
+            service_tokens=[],
             registry_auth=False,
             tailscale=True,
         )
@@ -189,6 +204,7 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
         self.assertNotIn("stable/rhel/10/tailscale.repo", content)
         self.assertIn('tailscale up --auth-key="file:$tailscale_auth_key" --hostname=edge-a', content)
         self.assertNotIn("--hostname=edge-a --ssh", content)
+        self.assertIn('rm -f "$seed/.arcturus-worker-token"', content)
         self.assertIn('"$seed/.tailscale-auth-key"', content)
         self.assertNotIn("tskey-", content)
 
@@ -203,10 +219,12 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
     def test_tailscale_ssh_is_an_explicit_opt_in(self):
         content = provision.render_firstboot(
             host_user="svcuser",
-            hostname="edge-a",
+            worker_id="edge-a",
+            control_plane_url="https://fleet.example:9190",
             bundle=f"registry.example/arcturus@sha256:{'b' * 64}",
             bundle_delivery="first-boot-pull",
             allowed_bind_roots=[],
+            service_tokens=[],
             registry_auth=False,
             tailscale=True,
             tailscale_ssh=True,
@@ -240,6 +258,7 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
                 payload = Path(command[-1]) / "deploy"
                 payload.mkdir(parents=True)
                 (payload / "install-host.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+                (payload / "arcturus-agent").write_text("agent\n", encoding="utf-8")
             return provision.subprocess.CompletedProcess(command, 0, "", "")
 
         with tempfile.TemporaryDirectory() as temporary, patch.object(
@@ -260,7 +279,9 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
         key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeButWellFormedForTest operator@example"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            worker = root / "worker.token"
             public = root / "id.pub"
+            worker.write_text("worker-secret\n", encoding="utf-8")
             public.write_text(key + "\n", encoding="utf-8")
             argv = [
                 "--non-interactive",
@@ -273,6 +294,9 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
                 "--image-url", image.url,
                 "--image-sha256", "a" * 64,
                 "--arcturus-bundle", f"registry.example/arcturus@sha256:{'b' * 64}",
+                "--worker-id", "edge-a",
+                "--control-plane-url", "https://fleet.example:9190",
+                "--worker-token-file", str(worker),
             ]
             output = io.StringIO()
             with (
@@ -299,8 +323,10 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
         key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeButWellFormedForTest operator@example"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            worker = root / "worker.token"
             public = root / "id.pub"
             image = root / "AlmaLinux-10-RaspberryPi-gpt-test.aarch64.raw"
+            worker.write_text("worker-secret\n", encoding="utf-8")
             public.write_text(key + "\n", encoding="utf-8")
             image.write_bytes(b"raw image")
             argv = [
@@ -314,6 +340,9 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
                 "--image-file", str(image),
                 "--image-sha256", provision.sha256_file(image),
                 "--arcturus-bundle", f"registry.example/arcturus@sha256:{'b' * 64}",
+                "--worker-id", "edge-a",
+                "--control-plane-url", "https://fleet.example:9190",
+                "--worker-token-file", str(worker),
             ]
             output = io.StringIO()
             with (

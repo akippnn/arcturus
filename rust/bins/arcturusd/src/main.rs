@@ -24,21 +24,37 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Err(env::VarError::NotPresent) => false,
         Err(error) => return Err(error.into()),
     };
-    let application = if upload_auth_enabled {
+    let fleet_enabled = environment_bool("ARCTURUSD_FLEET_ENABLED", false)?;
+    let mut application = if upload_auth_enabled {
         arcturusd::app(arcturusd::AppState::from_environment()?)
     } else {
         arcturusd::health_app()
     };
+    if fleet_enabled {
+        application = application.merge(arcturusd::fleet_app(
+            arcturusd::FleetRuntime::from_environment()?,
+        ));
+    }
     let address: SocketAddr = env::var("ARCTURUSD_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9190".to_owned())
         .parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    info!(%address, upload_auth_enabled, "Arcturus Rust control plane listening");
+    info!(%address, upload_auth_enabled, fleet_enabled, "Arcturus Rust control plane listening");
 
     axum::serve(listener, application)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn environment_bool(name: &str, default: bool) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    match env::var(name) {
+        Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "1" | "true") => Ok(true),
+        Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "0" | "false") => Ok(false),
+        Ok(value) => Err(format!("{name} must be true, false, 1, or 0; got {value}").into()),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn shutdown_signal() {

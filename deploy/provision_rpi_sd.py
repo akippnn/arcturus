@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare an AlmaLinux Raspberry Pi SD card for an Arcturus host.
+"""Prepare an AlmaLinux Raspberry Pi SD card for an Arcturus worker.
 
 The destructive path is intentionally macOS-specific because it relies on
 Disk Arbitration metadata to reject unsafe targets. Selection, rendering, and
@@ -28,6 +28,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from arcturus_paths import resolve_paths
 
 MINIMUM_DEVICE_BYTES = 8 * 1024**3
 DEVICE_PATTERN = re.compile(r"^/dev/disk[0-9]+$")
@@ -436,13 +438,17 @@ def cloud_init_user_data(hostname: str, public_key: str) -> str:
 def render_firstboot(
     *,
     host_user: str,
-    hostname: str,
+    worker_id: str,
+    control_plane_url: str,
     bundle: str,
     bundle_delivery: str,
     allowed_bind_roots: list[str],
+    service_tokens: list[str],
     registry_auth: bool,
     tailscale: bool = False,
     tailscale_ssh: bool = False,
+    layout_args: list[str] | None = None,
+    config_root: str | None = None,
 ) -> str:
     if bundle_delivery == "staged":
         installer = "/var/lib/arcturus-firstboot/payload/arcturus/deploy/install-host.sh"
@@ -455,10 +461,23 @@ def render_firstboot(
         *source_args,
         "--host-user",
         host_user,
+        "--enable-worker-agent",
+        "--control-plane-url",
+        control_plane_url,
+        "--worker-id",
+        worker_id,
+        "--worker-token-file",
+        "/var/lib/arcturus-firstboot/worker.token",
     ]
     for root in allowed_bind_roots:
         installer_args.extend(["--allowed-bind-root", root])
+    installer_args.extend(layout_args or [])
     command = shlex.join(installer_args)
+    token_installs = "\n".join(
+        f'install -m 0600 "$seed/.arcturus-lifecycle-{service}.token" '
+        + f'"$target_config_dir/lifecycle-tokens/{service}.token"'
+        for service in service_tokens
+    )
     registry_block = ""
     if registry_auth:
         registry_block = f"""
@@ -494,7 +513,7 @@ tailscale_auth_key=/var/lib/arcturus-firstboot/tailscale.authkey
 install -m 0600 "$seed/.tailscale-auth-key" "$tailscale_auth_key"
 trap 'rm -f "$tailscale_auth_key"' EXIT
 if ! tailscale status --json 2>/dev/null | grep -Eq '"BackendState"[[:space:]]*:[[:space:]]*"Running"'; then
-  tailscale up --auth-key="file:$tailscale_auth_key" --hostname={shlex.quote(hostname)}{ssh_flag}
+  tailscale up --auth-key="file:$tailscale_auth_key" --hostname={shlex.quote(worker_id)}{ssh_flag}
 fi
 rm -f "$tailscale_auth_key"
 """
@@ -507,6 +526,8 @@ marker=/var/lib/arcturus-firstboot/complete
 seed="$(findmnt -nr -S LABEL=CIDATA -o TARGET | head -n1)"
 [[ -n "$seed" ]] || {{ echo "CIDATA mount could not be discovered" >&2; exit 1; }}
 [[ -f "$seed/install-host.sh" ]] || {{ echo "CIDATA is missing install-host.sh" >&2; exit 1; }}
+[[ -f "$seed/arcturus_paths.py" ]] || {{ echo "CIDATA is missing arcturus_paths.py" >&2; exit 1; }}
+[[ -f "$seed/.arcturus-worker-token" ]] || {{ echo "CIDATA is missing worker credential" >&2; exit 1; }}
 {staged_required}
 {tailscale_required}
 
@@ -524,13 +545,20 @@ id {shlex.quote(host_user)} >/dev/null 2>&1 || useradd --create-home {shlex.quot
 host_user={shlex.quote(host_user)}
 host_home="$(getent passwd "$host_user" | cut -d: -f6)"
 [[ "$host_home" == /* ]] || {{ echo "home directory for $host_user could not be resolved" >&2; exit 1; }}
-target_config_root="$host_home/.config"
+target_config_root={shlex.quote(config_root) if config_root else '"$host_home/.config"'}
+target_config_dir="$target_config_root/arcturus"
 loginctl enable-linger "$host_user"
 uid="$(id -u "$host_user")"
 systemctl start "user-runtime-dir@$uid.service" "user@$uid.service"
 install -d -m 0700 /var/lib/arcturus-firstboot
 install -m 0755 "$seed/install-host.sh" /var/lib/arcturus-firstboot/install-host.sh
+install -m 0755 "$seed/arcturus_paths.py" /var/lib/arcturus-firstboot/arcturus_paths.py
+install -m 0600 "$seed/.arcturus-worker-token" /var/lib/arcturus-firstboot/worker.token
+chown "$host_user:$host_user" /var/lib/arcturus-firstboot/worker.token
 {staged_extract}
+install -d -m 0700 -o "$host_user" -g "$host_user" "$target_config_dir/lifecycle-tokens"
+{token_installs}
+chown -R "$host_user:$host_user" "$target_config_dir"
 {registry_block}
 runuser -u "$host_user" -- env \
   HOME="$host_home" USER="$host_user" LOGNAME="$host_user" \
@@ -538,8 +566,8 @@ runuser -u "$host_user" -- env \
   {command}
 
 touch "$marker"
-rm -f "$seed/.arcturus-registry-auth.json" "$seed/.tailscale-auth-key" "$seed/arcturus-payload.tar.gz"
-echo "Arcturus host first boot completed"
+rm -f "$seed/.arcturus-worker-token" "$seed"/.arcturus-lifecycle-*.token "$seed/.arcturus-registry-auth.json" "$seed/.tailscale-auth-key" "$seed/arcturus-payload.tar.gz"
+echo "Arcturus worker first boot completed"
 """
 
 
@@ -571,10 +599,10 @@ def stage_arcturus_bundle(
         run([container_cli, "cp", f"{container}:/opt/arcturus/.", str(payload)], capture=False)
     finally:
         run([container_cli, "rm", container], check=False, capture=False)
-    required = [payload / "deploy" / "install-host.sh"]
+    required = [payload / "deploy" / "install-host.sh", payload / "deploy" / "arcturus-agent"]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
-        raise ProvisionError(f"arm64 bundle is missing required host payload: {', '.join(missing)}")
+        raise ProvisionError(f"arm64 bundle is missing required worker payload: {', '.join(missing)}")
     archive = destination / "arcturus-payload.tar.gz"
     with tarfile.open(archive, "w:gz") as handle:
         handle.add(payload, arcname="arcturus")
@@ -601,14 +629,13 @@ def human_size(value: int) -> str:
 def cache_default() -> Path:
     if value := os.getenv("ARCTURUS_PROVISION_CACHE"):
         return Path(value).expanduser()
-    root = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
-    return root / "arcturus"
+    return resolve_paths().cache_dir
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="provision-rpi-sd",
-        description="Prepare an AlmaLinux Raspberry Pi SD card for an Arcturus host.",
+        description="Prepare an AlmaLinux Raspberry Pi SD card for an Arcturus worker.",
     )
     result.add_argument("--write", action="store_true", help="perform the destructive image write")
     result.add_argument("--non-interactive", action="store_true")
@@ -643,6 +670,15 @@ def parser() -> argparse.ArgumentParser:
         help="Podman or Docker used to extract a staged arm64 bundle; discovered when omitted",
     )
     result.add_argument("--host-user")
+    result.add_argument("--config-root")
+    result.add_argument("--data-root")
+    result.add_argument("--cache-root")
+    result.add_argument("--runtime-root")
+    result.add_argument("--bin-dir")
+    result.add_argument("--workload-root")
+    result.add_argument("--worker-id", required=True)
+    result.add_argument("--control-plane-url", required=True)
+    result.add_argument("--worker-token-file", type=Path, required=True)
     result.add_argument(
         "--tailscale-auth-key-file",
         type=Path,
@@ -653,6 +689,7 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable Tailscale SSH; disabled unless explicitly selected",
     )
+    result.add_argument("--service-token", action="append", default=[], metavar="SERVICE=FILE")
     result.add_argument(
         "--bundle-registry-auth-file",
         type=Path,
@@ -661,7 +698,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--target-registry-auth-file",
         type=Path,
-        help="pull-only Podman auth deliberately installed on the target host",
+        help="pull-only Podman auth deliberately installed on the target worker",
     )
     result.add_argument("--allowed-bind-root", action="append", default=[])
     return result
@@ -677,6 +714,19 @@ def prompt_value(value: str | None, prompt: str, suggestion: str | None = None) 
         if resolved:
             return resolved
         print(f"{prompt} is required.")
+
+
+def parse_service_tokens(values: list[str]) -> list[tuple[str, str]]:
+    parsed: list[tuple[str, str]] = []
+    for value in values:
+        service, separator, filename = value.partition("=")
+        if not separator or not NAME_PATTERN.fullmatch(service):
+            raise ProvisionError("--service-token must use valid-service=/path/to/token")
+        path = Path(filename).expanduser()
+        if not path.is_file():
+            raise ProvisionError(f"service token does not exist: {path}")
+        parsed.append((service, str(path)))
+    return parsed
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -700,6 +750,12 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ProvisionError(f"non-interactive mode requires: {', '.join(missing)}")
     if not DIGEST_REFERENCE.fullmatch(args.arcturus_bundle):
         raise ProvisionError("--arcturus-bundle must be IMAGE@sha256:<64 lowercase hex>")
+    if not NAME_PATTERN.fullmatch(args.worker_id):
+        raise ProvisionError("--worker-id must be a lowercase DNS-style identifier")
+    if not re.fullmatch(r"https?://[^\s]+", args.control_plane_url):
+        raise ProvisionError("--control-plane-url must be an HTTP(S) URL")
+    if not args.worker_token_file.is_file():
+        raise ProvisionError(f"worker token does not exist: {args.worker_token_file}")
     if args.image_file and args.image_url:
         raise ProvisionError("--image-file and --image-url are mutually exclusive")
     if args.image_file and not args.image_sha256:
@@ -720,6 +776,17 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ProvisionError(
             f"target registry auth file does not exist: {args.target_registry_auth_file}"
         )
+    for option in (
+        "config_root",
+        "data_root",
+        "cache_root",
+        "runtime_root",
+        "bin_dir",
+        "workload_root",
+    ):
+        value = getattr(args, option)
+        if value and not Path(value).expanduser().is_absolute():
+            raise ProvisionError(f"--{option.replace('_', '-')} must be an absolute path")
 
 
 def select_container_cli(value: str | None) -> str | None:
@@ -863,7 +930,7 @@ def write_seed(
     files = {
         "user-data": cloud_init_user_data(args.hostname, public_key),
         "meta-data": json.dumps(
-            {"instance-id": f"arcturus-{args.hostname}", "local-hostname": args.hostname},
+            {"instance-id": f"arcturus-{args.worker_id}", "local-hostname": args.hostname},
             indent=2,
             sort_keys=True,
         )
@@ -871,11 +938,17 @@ def write_seed(
         "network-config": network_config(context, static_address, args.target_interface),
         "arcturus-firstboot.sh": firstboot,
         "install-host.sh": (repository_root / "deploy" / "install-host.sh").read_text(encoding="utf-8"),
+        "arcturus_paths.py": (repository_root / "deploy" / "arcturus_paths.py").read_text(
+            encoding="utf-8"
+        ),
     }
     for name, content in files.items():
         (mount / name).write_text(content, encoding="utf-8")
+    shutil.copyfile(args.worker_token_file, mount / ".arcturus-worker-token")
     if args.tailscale_auth_key_file:
         shutil.copyfile(args.tailscale_auth_key_file.expanduser(), mount / ".tailscale-auth-key")
+    for service, value in parse_service_tokens(args.service_token):
+        shutil.copyfile(value, mount / f".arcturus-lifecycle-{service}.token")
     if args.target_registry_auth_file:
         shutil.copyfile(args.target_registry_auth_file, mount / ".arcturus-registry-auth.json")
     if payload_archive:
@@ -940,7 +1013,7 @@ def main(argv: list[str] | None = None) -> int:
         context = discover_macos_network(args.host_interface)
         static_address = pick_static_address(args, context)
         args.target_interface = prompt_value(args.target_interface, "Target wired interface")
-        args.hostname = prompt_value(args.hostname, "Target hostname", "arcturus-pi")
+        args.hostname = prompt_value(args.hostname, "Target hostname", args.worker_id)
         args.host_user = prompt_value(args.host_user, "Rootless Arcturus service account")
         if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_-]{0,31}", args.host_user):
             raise ProvisionError("invalid service account name")
@@ -956,15 +1029,31 @@ def main(argv: list[str] | None = None) -> int:
             if local_image
             else resolve_checksum(image_choice.url, args.image_sha256)
         )
+        service_tokens = parse_service_tokens(args.service_token)
+        layout_args: list[str] = []
+        for option in (
+            "config_root",
+            "data_root",
+            "cache_root",
+            "runtime_root",
+            "bin_dir",
+            "workload_root",
+        ):
+            if value := getattr(args, option):
+                layout_args.extend([f"--{option.replace('_', '-')}", str(Path(value).expanduser())])
         firstboot = render_firstboot(
             host_user=args.host_user,
-            hostname=args.hostname,
+            worker_id=args.worker_id,
+            control_plane_url=args.control_plane_url,
             bundle=args.arcturus_bundle,
             bundle_delivery=args.bundle_delivery,
             allowed_bind_roots=args.allowed_bind_root,
+            service_tokens=[service for service, _ in service_tokens],
             registry_auth=args.target_registry_auth_file is not None,
             tailscale=args.tailscale_auth_key_file is not None,
             tailscale_ssh=args.tailscale_ssh,
+            layout_args=layout_args,
+            config_root=args.config_root,
         )
         plan = {
             "mode": "write" if args.write else "plan-only",
@@ -973,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
             "staticAddress": static_address,
             "targetInterface": args.target_interface,
             "hostname": args.hostname,
+            "workerId": args.worker_id,
             "image": {
                 "source": str(local_image) if local_image else image_choice.url,
                 "sha256": checksum,

@@ -10,7 +10,13 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
-RUST_PACKAGES = {"arcturus-auth", "arcturus-contracts", "arcturusd"}
+RUST_PACKAGES = {
+    "arcturus-agent",
+    "arcturus-auth",
+    "arcturus-contracts",
+    "arcturus-paths",
+    "arcturusd",
+}
 NODE_MODULES = ("bus", "registry", "router")
 
 

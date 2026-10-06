@@ -4,8 +4,15 @@ import { MessageBus } from "./bus.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`;
-const SOCKET_PATH = process.env.BUS_SOCKET || `${runtimeDir}/arcturus/bus.sock`;
+function requiredPath(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} must be supplied by the canonical Arcturus layout`);
+  }
+  return value;
+}
+
+const SOCKET_PATH = requiredPath("BUS_SOCKET");
 
 async function main() {
   try { mkdirSync(dirname(SOCKET_PATH), { recursive: true }); } catch { /* ignore */ }

@@ -701,12 +701,12 @@ fn verify_registry_digest_header(
     headers: &BTreeMap<String, String>,
     expected: &Sha256Digest,
 ) -> Result<(), RegistryVerificationError> {
-    if let Some(actual) = headers.get("docker-content-digest") {
-        if actual != expected.as_str() {
-            return Err(RegistryVerificationError::Rejected(format!(
-                "registry digest header mismatch: expected {expected}, got {actual}"
-            )));
-        }
+    if let Some(actual) = headers.get("docker-content-digest")
+        && actual != expected.as_str()
+    {
+        return Err(RegistryVerificationError::Rejected(format!(
+            "registry digest header mismatch: expected {expected}, got {actual}"
+        )));
     }
     Ok(())
 }

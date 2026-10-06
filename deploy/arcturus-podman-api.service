@@ -4,10 +4,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=-%h/.config/arcturus/registry.env
-ExecStartPre=/usr/bin/mkdir -p %t/arcturus
-ExecStart=/usr/bin/podman system service --time=0 unix://%t/arcturus/podman.sock
-ExecStopPost=/usr/bin/rm -f %t/arcturus/podman.sock
+EnvironmentFile=-"@CONFIG_DIR@/registry.env"
+ExecStartPre=/usr/bin/mkdir -p "@RUNTIME_DIR@"
+ExecStart=/usr/bin/podman system service --time=0 "unix://@RUNTIME_DIR@/podman.sock"
+ExecStopPost=/usr/bin/rm -f "@RUNTIME_DIR@/podman.sock"
 Restart=always
 RestartSec=2s
 

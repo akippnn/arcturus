@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 renderer="$root/deploy/render-oci-registry-quadlet.sh"
 digest="sha256:$(printf 'a%.0s' {1..64})"
-output="$($renderer \
+output="$("$renderer" \
   "registry.example.org/distribution/distribution@$digest" \
   9443 \
   /home/appsvc/.local/share/arcturus-registry \
@@ -16,7 +16,7 @@ grep -Fq 'EnvironmentFile=/home/appsvc/.config/arcturus/oci-registry-runtime.env
 grep -Fq 'Volume=/home/appsvc/.local/share/arcturus-registry:/var/lib/registry:Z' <<<"$output"
 ! grep -Fq 'Requires=arcturusd.service' <<<"$output"
 
-auth_output="$($renderer \
+auth_output="$("$renderer" \
   "registry.example.org/distribution/distribution@$digest" \
   9443 \
   /home/appsvc/.local/share/arcturus-registry \

@@ -4,16 +4,16 @@ After=network.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/arcturus/platform.env
-ExecStartPre=/usr/bin/mkdir -p %t/arcturus
-ExecStart=/usr/bin/node %h/.local/share/arcturus-deployer/current/modules/bus/dist/index.js
+EnvironmentFile="@CONFIG_DIR@/platform.env"
+ExecStartPre=/usr/bin/mkdir -p "@RUNTIME_DIR@"
+ExecStart=/usr/bin/node "@STATE_DIR@/current/modules/bus/dist/index.js"
 Restart=on-failure
 RestartSec=3s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%t/arcturus
+ReadWritePaths="@RUNTIME_DIR@"
 
 [Install]
 WantedBy=default.target

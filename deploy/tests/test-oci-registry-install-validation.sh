@@ -13,15 +13,17 @@ mkdir -p "$home" "$source_dir" "$vhosts" "$stubs"
 
 for file in app.py image_policy_app.py release.py arcturusctl.py requirements.txt \
   arcturus-deployer@.service arcturus-podman-api.service arcturus-bus.service \
-  arcturus-registry.service arcturus-router.service arcturusd.service arcturusctl; do
+  arcturus-registry.service arcturus-router.service arcturusd.service arcturus-agent.service arcturusctl; do
   : >"$source_dir/$file"
 done
+cp "$root/deploy/arcturus_paths.py" "$source_dir/arcturus_paths.py"
 cp "$root/deploy/render-oci-registry-quadlet.sh" "$source_dir/render-oci-registry-quadlet.sh"
 cp "$root/deploy/configure-oci-tailnet-ingress.sh" "$source_dir/configure-oci-tailnet-ingress.sh"
 cp "$root/deploy/arcturus-oci-publish.sh" "$source_dir/arcturus-oci-publish.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$source_dir/arcturusd"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$source_dir/arcturus-agent"
 chmod +x "$source_dir/render-oci-registry-quadlet.sh" "$source_dir/configure-oci-tailnet-ingress.sh" \
-  "$source_dir/arcturus-oci-publish.sh" "$source_dir/arcturusd"
+  "$source_dir/arcturus-oci-publish.sh" "$source_dir/arcturusd" "$source_dir/arcturus-agent"
 for module in bus registry router; do
   mkdir -p "$source_root/modules/$module/dist"
   : >"$source_root/modules/$module/dist/index.js"
@@ -91,6 +93,33 @@ run_installer \
   --oci-registry-storage "$home/registry" \
   | grep -Fq 'OCI data plane:'
 
+run_installer --enable-fleet-control-plane --fleet-listen-address 100.64.0.10 \
+  | grep -Fq 'Fleet control:     enabled on 100.64.0.10:9190'
+if run_installer --enable-fleet-control-plane --fleet-listen-address 0.0.0.0 \
+  >/dev/null 2>&1; then
+  echo 'installer accepted an unrestricted fleet listener' >&2
+  exit 1
+fi
+if run_installer --enable-worker-agent >/dev/null 2>&1; then
+  echo 'installer accepted a worker agent without identity or credentials' >&2
+  exit 1
+fi
+worker_token="$workspace/worker.token"
+printf 'fixture-worker-credential\n' >"$worker_token"
+chmod 0600 "$worker_token"
+run_installer --enable-worker-agent --worker-id worker-a \
+  --control-plane-url http://192.0.2.10:9190 --worker-token-file "$worker_token" \
+  | grep -Fq 'Worker agent:      enabled as worker-a -> http://192.0.2.10:9190'
+
+run_installer --config-root "$workspace/xdg-config" --data-root "$workspace/xdg-data" \
+  --cache-root "$workspace/xdg-cache" --runtime-root "$workspace/xdg-runtime" \
+  --bin-dir "$workspace/bin-root" --workload-root "$workspace/workloads" \
+  | grep -Fq "configuration:     $workspace/xdg-config/arcturus"
+run_installer --config-root "$workspace/xdg-config" --data-root "$workspace/xdg-data" \
+  --cache-root "$workspace/xdg-cache" --runtime-root "$workspace/xdg-runtime" \
+  --bin-dir "$workspace/bin-root" --workload-root "$workspace/workloads" \
+  | grep -Fq "state:             $workspace/xdg-data/arcturus-deployer"
+
 local_version_before="$(run_installer | awk '/  version:/ {print $2}')"
 printf 'export const changed = true;\n' >>"$source_root/modules/router/dist/index.js"
 local_version_after="$(run_installer | awk '/  version:/ {print $2}')"
@@ -156,6 +185,10 @@ ARCTURUS_OCI_AUTH_ENABLED=true
 ARCTURUS_OCI_REGISTRY_HOST=registry.example.ts.net
 ARCTURUS_OCI_TAILSCALE_SERVICE=svc:old-arcturus-oci
 CONFIG
+if run_installer --config-root "$workspace/moved-config" >/dev/null 2>&1; then
+  echo 'installer silently abandoned legacy configuration after a root change' >&2
+  exit 1
+fi
 run_installer | grep -Fq '127.0.0.1:9555'
 run_installer | grep -Fq 'OCI authorization: enabled'
 run_installer --disable-oci-auth | grep -Fq 'OCI authorization: disabled'
@@ -201,11 +234,11 @@ grep -Fq 'OCI_TAILSCALE_SERVICE_TO_CLEAR="$existing_oci_service"' \
   "$root/deploy/install-host.sh"
 grep -Fq '"$OCI_TAILSCALE_SERVICE_TO_CLEAR" != "$OCI_TAILSCALE_SERVICE"' \
   "$root/deploy/install-host.sh"
-grep -Fq 'OCI_AUTH_STATE_DIR="$HOST_HOME/.local/share/arcturus-oci-auth"' \
+grep -Fq 'OCI_AUTH_STATE_DIR="$ARCTURUS_PATH_OCI_AUTH_STATE_DIR"' \
   "$root/deploy/install-host.sh"
-grep -Fq 'ReadWritePaths=%h/.local/share/arcturus-oci-auth' \
+grep -Fq 'ReadWritePaths="@OCI_AUTH_STATE_DIR@"' \
   "$root/deploy/arcturusd.service"
-! grep -Fq 'ReadWritePaths=%h/.local/share/arcturus-deployer' \
+! grep -Fq 'ReadWritePaths=%h/' \
   "$root/deploy/arcturusd.service"
 
 echo 'OCI registry installer validation tests passed.'

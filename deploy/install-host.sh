@@ -10,6 +10,12 @@ Usage: install-host.sh [options]
   --version VERSION           Installed release name (auto-detected by default)
   --host-user USER            Rootless service account (default: current user)
   --host-home DIR             Override resolved home (primarily fixtures/images)
+  --config-root DIR           XDG/FHS configuration root
+  --data-root DIR             XDG/FHS persistent-data root
+  --cache-root DIR            XDG/FHS cache root
+  --runtime-root DIR          XDG/FHS runtime root
+  --bin-dir DIR               Executable directory (default: ~/.local/bin)
+  --workload-root DIR         Legacy/source workload root (default: ~/stacks)
   --listen-address ADDRESS    Additional private API listener; never 0.0.0.0 or ::
   --runner-cidr CIDR          Trusted CI source for optional firewalld rule
   --allowed-bind-root DIR     Repeatable bind-mount allowlist
@@ -25,12 +31,18 @@ Usage: install-host.sh [options]
   --disallow-legacy-mutable-main Re-enable immutable-SHA enforcement for old /deploy requests
   --oci-registry-image IMAGE  Digest-pinned, supported Distribution v3 image; enables OCI storage
   --oci-registry-port PORT    Loopback OCI port (default: 9443)
-  --oci-registry-storage DIR  Persistent OCI storage (default: ~/.local/share/arcturus-registry)
+  --oci-registry-storage DIR  Persistent OCI storage (default: <data-root>/arcturus-registry)
   --enable-oci-auth           Install Rust auth and configure registry token verification
   --disable-oci-auth          Keep local registry but disable Rust token authorization
   --oci-registry-host HOST    Advertised private HTTPS registry hostname (*.ts.net)
   --oci-tailscale-service SVC Dedicated Tailscale Service name (svc:<name>)
   --disable-oci-registry      Disable and remove the local OCI data-plane unit
+  --enable-fleet-control-plane Enable the Rust fleet API on this host
+  --fleet-listen-address IP   Private/loopback fleet API address (default: 127.0.0.1)
+  --enable-worker-agent       Enable the outbound worker agent on this host
+  --control-plane-url URL     Fleet API URL used by the worker agent
+  --worker-id ID              Stable enrolled worker identity
+  --worker-token-file FILE    Protected credential returned by worker enrollment
   --configure-firewall        Add a source-scoped firewalld rule for port 9090
   --validate-only             Validate inputs and prerequisites without writing
   --dry-run                   Print the resolved installation without writing
@@ -43,6 +55,12 @@ BUNDLE=""
 VERSION=""
 HOST_USER="${USER:-$(id -un)}"
 HOST_HOME_OVERRIDE="${ARCTURUS_HOST_HOME:-}"
+CONFIG_ROOT_OPTION=""
+DATA_ROOT_OPTION=""
+CACHE_ROOT_OPTION=""
+RUNTIME_ROOT_OPTION=""
+BIN_DIR_OPTION=""
+WORKLOAD_ROOT_OPTION=""
 LISTEN_ADDRESS=""
 RUNNER_CIDR=""
 NETWORK="internal_routing"
@@ -70,6 +88,12 @@ OCI_MAX_LAYER_BYTES=536870912
 OCI_MAX_ARTIFACT_BYTES=805306368
 OCI_MIN_FREE_BYTES=$((OCI_MAX_ARTIFACT_BYTES * 2))
 DISABLE_OCI_REGISTRY=false
+FLEET_CONTROL_PLANE=false
+FLEET_LISTEN_ADDRESS="127.0.0.1"
+WORKER_AGENT=false
+CONTROL_PLANE_URL=""
+WORKER_ID=""
+WORKER_TOKEN_FILE=""
 CONFIGURE_FIREWALL=false
 VALIDATE_ONLY=false
 DRY_RUN=false
@@ -83,6 +107,12 @@ while (($#)); do
     --version) VERSION="$2"; shift 2 ;;
     --host-user) HOST_USER="$2"; shift 2 ;;
     --host-home) HOST_HOME_OVERRIDE="$2"; shift 2 ;;
+    --config-root) CONFIG_ROOT_OPTION="$2"; shift 2 ;;
+    --data-root) DATA_ROOT_OPTION="$2"; shift 2 ;;
+    --cache-root) CACHE_ROOT_OPTION="$2"; shift 2 ;;
+    --runtime-root) RUNTIME_ROOT_OPTION="$2"; shift 2 ;;
+    --bin-dir) BIN_DIR_OPTION="$2"; shift 2 ;;
+    --workload-root) WORKLOAD_ROOT_OPTION="$2"; shift 2 ;;
     --listen-address) LISTEN_ADDRESS="$2"; shift 2 ;;
     --runner-cidr) RUNNER_CIDR="$2"; shift 2 ;;
     --allowed-bind-root) ALLOWED_BIND_ROOTS+=("$2"); shift 2 ;;
@@ -104,6 +134,12 @@ while (($#)); do
     --oci-registry-host) OCI_REGISTRY_HOST="$2"; shift 2 ;;
     --oci-tailscale-service) OCI_TAILSCALE_SERVICE="$2"; shift 2 ;;
     --disable-oci-registry) DISABLE_OCI_REGISTRY=true; shift ;;
+    --enable-fleet-control-plane) FLEET_CONTROL_PLANE=true; shift ;;
+    --fleet-listen-address) FLEET_LISTEN_ADDRESS="$2"; shift 2 ;;
+    --enable-worker-agent) WORKER_AGENT=true; shift ;;
+    --control-plane-url) CONTROL_PLANE_URL="$2"; shift 2 ;;
+    --worker-id) WORKER_ID="$2"; shift 2 ;;
+    --worker-token-file) WORKER_TOKEN_FILE="$2"; shift 2 ;;
     --configure-firewall) CONFIGURE_FIREWALL=true; shift ;;
     --validate-only) VALIDATE_ONLY=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -165,6 +201,21 @@ fi
 if [[ -n "$BUNDLE" && ! "$BUNDLE" =~ @sha256:[0-9a-f]{64}$ ]]; then
   errors+=("--bundle must be pinned as repository@sha256:digest")
 fi
+if $WORKER_AGENT; then
+  [[ "$WORKER_ID" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || errors+=("--enable-worker-agent requires a valid --worker-id")
+  [[ "$CONTROL_PLANE_URL" =~ ^https?://[^[:space:]]+$ ]] || errors+=("--enable-worker-agent requires --control-plane-url")
+  [[ -f "$WORKER_TOKEN_FILE" ]] || errors+=("--enable-worker-agent requires an existing --worker-token-file")
+fi
+if ! "$PYTHON_BIN" - "$FLEET_LISTEN_ADDRESS" <<'PY'
+import ipaddress, sys
+address = ipaddress.ip_address(sys.argv[1])
+tailscale_cgnat = ipaddress.ip_network("100.64.0.0/10")
+allowed = address.is_private or address.is_loopback or address in tailscale_cgnat
+raise SystemExit(0 if allowed and not address.is_unspecified else 1)
+PY
+then
+  errors+=("--fleet-listen-address must be a private or loopback IP address")
+fi
 if [[ -z "$SOURCE_DIR" && -z "$BUNDLE" ]]; then
   SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
@@ -172,9 +223,9 @@ if [[ -n "$SOURCE_DIR" && ! -f "$SOURCE_DIR/requirements.txt" ]]; then
   errors+=("source directory does not contain requirements.txt: $SOURCE_DIR")
 fi
 if [[ -n "$SOURCE_DIR" ]]; then
-  for file in app.py image_policy_app.py release.py arcturusctl.py arcturus-deployer@.service \
+  for file in app.py image_policy_app.py release.py arcturus_paths.py arcturusctl.py arcturus-deployer@.service \
     arcturus-podman-api.service arcturus-bus.service arcturus-registry.service \
-    arcturus-router.service arcturusd.service render-oci-registry-quadlet.sh \
+    arcturus-router.service arcturusd.service arcturus-agent.service render-oci-registry-quadlet.sh \
     configure-oci-tailnet-ingress.sh arcturus-oci-publish.sh; do
     [[ -f "$SOURCE_DIR/$file" ]] || errors+=("source artifact is missing: $SOURCE_DIR/$file")
   done
@@ -203,12 +254,84 @@ if [[ "$(id -un)" != "$HOST_USER" && $VALIDATE_ONLY == false && $DRY_RUN == fals
   exit 2
 fi
 
+PATHS_HELPER="${SOURCE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/arcturus_paths.py"
+[[ -f "$PATHS_HELPER" ]] || {
+  echo "Arcturus path resolver is missing: $PATHS_HELPER" >&2
+  exit 2
+}
+path_environment=(env HOME="$HOST_HOME")
+[[ -z "$CONFIG_ROOT_OPTION" ]] || path_environment+=(ARCTURUS_CONFIG_ROOT="$CONFIG_ROOT_OPTION")
+[[ -z "$DATA_ROOT_OPTION" ]] || path_environment+=(ARCTURUS_DATA_ROOT="$DATA_ROOT_OPTION")
+[[ -z "$CACHE_ROOT_OPTION" ]] || path_environment+=(ARCTURUS_CACHE_ROOT="$CACHE_ROOT_OPTION")
+[[ -z "$RUNTIME_ROOT_OPTION" ]] || path_environment+=(ARCTURUS_RUNTIME_ROOT="$RUNTIME_ROOT_OPTION")
+[[ -z "$BIN_DIR_OPTION" ]] || path_environment+=(ARCTURUS_BIN_DIR="$BIN_DIR_OPTION")
+[[ -z "$WORKLOAD_ROOT_OPTION" ]] || path_environment+=(ARCTURUS_WORKLOAD_ROOT="$WORKLOAD_ROOT_OPTION")
+resolved_paths="$("${path_environment[@]}" "$PYTHON_BIN" "$PATHS_HELPER" --home "$HOST_HOME" --uid "$HOST_UID" --format shell)" || exit 2
+eval "$resolved_paths"
+
+STATE_DIR="$ARCTURUS_PATH_DEPLOYER_STATE_DIR"
+CONFIG_DIR="$ARCTURUS_PATH_CONFIG_DIR"
+UNIT_DIR="$ARCTURUS_PATH_SYSTEMD_DIR"
+QUADLET_DIR="$ARCTURUS_PATH_QUADLET_DIR"
+BIN_DIR="$ARCTURUS_PATH_BIN_DIR"
+RUNTIME_DIR="$ARCTURUS_PATH_RUNTIME_DIR"
+WORKLOAD_ROOT="$ARCTURUS_PATH_WORKLOAD_ROOT"
+FLEET_STATE_DIR="$ARCTURUS_PATH_FLEET_STATE_DIR"
+AGENT_STATE_DIR="$ARCTURUS_PATH_AGENT_STATE_DIR"
+OCI_AUTH_STATE_DIR="$ARCTURUS_PATH_OCI_AUTH_STATE_DIR"
+OCI_REGISTRY_STATE_DIR="$ARCTURUS_PATH_OCI_REGISTRY_STATE_DIR"
+
+for resolved_path in \
+  "$STATE_DIR" "$CONFIG_DIR" "$UNIT_DIR" "$QUADLET_DIR" "$BIN_DIR" \
+  "$RUNTIME_DIR" "$WORKLOAD_ROOT" "$FLEET_STATE_DIR" "$AGENT_STATE_DIR" \
+  "$OCI_AUTH_STATE_DIR" "$OCI_REGISTRY_STATE_DIR"; do
+  if [[ "$resolved_path" =~ [[:space:]] ]]; then
+    echo "Installer-managed paths must not contain whitespace: $resolved_path" >&2
+    exit 2
+  fi
+done
+
+# A newly selected XDG/FHS root must never make an existing installation look
+# empty. Operators migrate while services are stopped, retain the old tree for
+# rollback, and then rerun the installer. Matching target state proves that the
+# transition was deliberate; the installer itself never copies a live SQLite
+# database or mutable registry storage.
+refuse_implicit_path_move() {
+  local label="$1" legacy="$2" target="$3" marker="$4"
+  [[ "$legacy" != "$target" && -e "$legacy/$marker" && ! -e "$target/$marker" ]] || return 0
+  cat >&2 <<EOF
+Refusing an implicit $label path transition.
+  existing: $legacy
+  selected: $target
+  marker:   $marker
+Stop Arcturus, copy this state with metadata preserved, verify the target, and rerun.
+See docs/filesystem-layout.md for the non-destructive migration procedure.
+EOF
+  exit 2
+}
+
+legacy_config_dir="$HOST_HOME/.config/arcturus"
+legacy_state_dir="$HOST_HOME/.local/share/arcturus-deployer"
+legacy_oci_auth_dir="$HOST_HOME/.local/share/arcturus-oci-auth"
+legacy_oci_registry_dir="$HOST_HOME/.local/share/arcturus-registry"
+for marker in deployer.env platform.env host-install.json tokens.json fleet-tokens.json \
+  oci-registry.env oci-signing.seed agent.env arcturusd.env; do
+  refuse_implicit_path_move configuration "$legacy_config_dir" "$CONFIG_DIR" "$marker"
+done
+for marker in state.sqlite3 current; do
+  refuse_implicit_path_move lifecycle-state "$legacy_state_dir" "$STATE_DIR" "$marker"
+done
+for marker in grants.sqlite3 jwks.json; do
+  refuse_implicit_path_move oci-authorization-state "$legacy_oci_auth_dir" "$OCI_AUTH_STATE_DIR" "$marker"
+done
+refuse_implicit_path_move oci-registry-state "$legacy_oci_registry_dir" "$OCI_REGISTRY_STATE_DIR" docker
+
 # An upgrade should preserve the installed platform configuration when the
 # operator only supplies a new bundle. Read generated key/value files without
 # sourcing them as shell code.
-existing_deployer_config="$HOST_HOME/.config/arcturus/deployer.env"
-existing_platform_config="$HOST_HOME/.config/arcturus/platform.env"
-existing_oci_config="$HOST_HOME/.config/arcturus/oci-registry.env"
+existing_deployer_config="$CONFIG_DIR/deployer.env"
+existing_platform_config="$CONFIG_DIR/platform.env"
+existing_oci_config="$CONFIG_DIR/oci-registry.env"
 read_existing_value() {
   local file="$1" key="$2"
   [[ -f "$file" ]] || return 0
@@ -272,7 +395,7 @@ if ((${#ALLOWED_BIND_ROOTS[@]} == 0)); then
   if [[ -n "$existing_roots" ]]; then
     IFS=',' read -r -a ALLOWED_BIND_ROOTS <<<"$existing_roots"
   else
-    ALLOWED_BIND_ROOTS=("$HOST_HOME/stacks")
+    ALLOWED_BIND_ROOTS=("$WORKLOAD_ROOT")
   fi
 fi
 [[ -n "$VHOSTS_DIR" ]] || VHOSTS_DIR="$(read_existing_value "$existing_platform_config" VHOSTS_DIR)"
@@ -339,7 +462,7 @@ fi
 if [[ -z "$VHOSTS_DIR" ]]; then
   for candidate in \
     "$HOST_HOME/arcturus/portal/config/nginx/vhosts.d" \
-    "$HOST_HOME/stacks/portal/config/nginx/vhosts.d"; do
+    "$WORKLOAD_ROOT/portal/config/nginx/vhosts.d"; do
     if [[ -d "$candidate" ]]; then
       VHOSTS_DIR="$candidate"
       break
@@ -352,7 +475,7 @@ if [[ -z "$VHOSTS_DIR" || ! -d "$VHOSTS_DIR" ]]; then
 fi
 CERT_DOMAIN="${CERT_DOMAIN:-$BASE_DOMAIN}"
 if [[ -n "$OCI_REGISTRY_IMAGE" && -z "$OCI_REGISTRY_STORAGE" ]]; then
-  OCI_REGISTRY_STORAGE="$HOST_HOME/.local/share/arcturus-registry"
+  OCI_REGISTRY_STORAGE="$OCI_REGISTRY_STATE_DIR"
 fi
 
 oci_errors=()
@@ -376,8 +499,17 @@ fi
 if $OCI_AUTH_ENABLED && [[ "$OCI_REGISTRY_PORT" == 9190 ]]; then
   oci_errors+=("--oci-registry-port must not conflict with the Rust authorization port 9190")
 fi
+if $OCI_AUTH_ENABLED && $FLEET_CONTROL_PLANE && [[ "$FLEET_LISTEN_ADDRESS" != 127.0.0.1 ]]; then
+  oci_errors+=("a non-loopback fleet listener cannot share DIST-001 arcturusd with OCI authorization")
+fi
 if $OCI_AUTH_ENABLED && [[ -n "$SOURCE_DIR" && ! -x "$SOURCE_DIR/arcturusd" ]]; then
   oci_errors+=("--enable-oci-auth requires a compiled executable at $SOURCE_DIR/arcturusd")
+fi
+if $FLEET_CONTROL_PLANE && [[ -n "$SOURCE_DIR" && ! -x "$SOURCE_DIR/arcturusd" ]]; then
+  oci_errors+=("--enable-fleet-control-plane requires a compiled executable at $SOURCE_DIR/arcturusd")
+fi
+if $WORKER_AGENT && [[ -n "$SOURCE_DIR" && ! -x "$SOURCE_DIR/arcturus-agent" ]]; then
+  oci_errors+=("--enable-worker-agent requires a compiled executable at $SOURCE_DIR/arcturus-agent")
 fi
 if [[ -n "$OCI_REGISTRY_HOST" && ! "$OCI_REGISTRY_HOST" =~ ^[a-z0-9][a-z0-9.-]*\.ts\.net$ ]]; then
   oci_errors+=("--oci-registry-host must be a full lowercase Tailscale hostname ending in .ts.net")
@@ -404,12 +536,6 @@ if $OCI_AUTH_ENABLED && [[ -n "$OCI_REGISTRY_HOST" && -n "$OCI_TAILSCALE_SERVICE
   OCI_WRITABLE_ENABLED=true
 fi
 
-STATE_DIR="$HOST_HOME/.local/share/arcturus-deployer"
-CONFIG_DIR="$HOST_HOME/.config/arcturus"
-UNIT_DIR="$HOST_HOME/.config/systemd/user"
-QUADLET_DIR="$HOST_HOME/.config/containers/systemd/arcturus"
-BIN_DIR="$HOST_HOME/.local/bin"
-RUNTIME_DIR="/run/user/$HOST_UID/arcturus"
 CONFIG_FILE="$CONFIG_DIR/deployer.env"
 PLATFORM_CONFIG_FILE="$CONFIG_DIR/platform.env"
 OCI_CONFIG_FILE="$CONFIG_DIR/oci-registry.env"
@@ -417,8 +543,10 @@ OCI_RUNTIME_ENV_FILE="$CONFIG_DIR/oci-registry-runtime.env"
 OCI_QUADLET_FILE="$QUADLET_DIR/arcturus-oci-registry.container"
 ARCTURUSD_CONFIG_FILE="$CONFIG_DIR/arcturusd.env"
 ARCTURUSD_UNIT_FILE="$UNIT_DIR/arcturusd.service"
+AGENT_CONFIG_FILE="$CONFIG_DIR/agent.env"
+AGENT_UNIT_FILE="$UNIT_DIR/arcturus-agent.service"
+FLEET_TOKEN_FILE="$CONFIG_DIR/fleet-tokens.json"
 OCI_SIGNING_KEY_FILE="$CONFIG_DIR/oci-signing.seed"
-OCI_AUTH_STATE_DIR="$HOST_HOME/.local/share/arcturus-oci-auth"
 OCI_JWKS_FILE="$OCI_AUTH_STATE_DIR/jwks.json"
 OCI_AUTH_DB="$OCI_AUTH_STATE_DIR/grants.sqlite3"
 
@@ -443,6 +571,10 @@ cat <<EOF
 Arcturus host configuration
   user:              $HOST_USER ($HOST_UID)
   home:              $HOST_HOME
+  config root:       $ARCTURUS_PATH_CONFIG_ROOT
+  data root:         $ARCTURUS_PATH_DATA_ROOT
+  cache root:        $ARCTURUS_PATH_CACHE_ROOT
+  runtime root:      $ARCTURUS_PATH_RUNTIME_ROOT
   version:           $VERSION
   source:            ${SOURCE_DIR:-$BUNDLE}
   listeners:         127.0.0.1${LISTEN_ADDRESS:+, $LISTEN_ADDRESS}
@@ -453,7 +585,11 @@ Arcturus host configuration
   OCI private HTTPS: ${OCI_REGISTRY_HOST:-disabled}${OCI_TAILSCALE_SERVICE:+ via $OCI_TAILSCALE_SERVICE}
   OCI write ingress: $([[ "$OCI_WRITABLE_ENABLED" == true ]] && echo enabled-after-validation || echo read-only)
   OCI storage:       ${OCI_REGISTRY_STORAGE:-not configured}
+  Fleet control:     $([[ "$FLEET_CONTROL_PLANE" == true ]] && echo "enabled on $FLEET_LISTEN_ADDRESS:9190" || echo disabled)
+  Worker agent:      $([[ "$WORKER_AGENT" == true ]] && echo "enabled as $WORKER_ID -> $CONTROL_PLANE_URL" || echo disabled)
   state:             $STATE_DIR
+  configuration:     $CONFIG_DIR
+  runtime:           $RUNTIME_DIR
   allowed bind roots: $(IFS=,; echo "${ALLOWED_BIND_ROOTS[*]}")
 EOF
 
@@ -512,17 +648,20 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ -n "$SOURCE_DIR" ]]; then
-  for file in app.py image_policy_app.py release.py arcturusctl.py requirements.txt \
+  for file in app.py image_policy_app.py release.py arcturus_paths.py arcturusctl.py requirements.txt \
     arcturus-deployer@.service arcturus-podman-api.service arcturus-bus.service \
-    arcturus-registry.service arcturus-router.service arcturusd.service arcturusctl \
+    arcturus-registry.service arcturus-router.service arcturusd.service arcturus-agent.service arcturusctl \
     render-oci-registry-quadlet.sh configure-oci-tailnet-ingress.sh arcturus-oci-publish.sh; do
     install -m 0644 "$SOURCE_DIR/$file" "$staging/$file"
   done
-  chmod 0755 "$staging/arcturusctl" "$staging/arcturusctl.py" \
+  chmod 0755 "$staging/arcturusctl" "$staging/arcturusctl.py" "$staging/arcturus_paths.py" \
     "$staging/render-oci-registry-quadlet.sh" "$staging/configure-oci-tailnet-ingress.sh" \
     "$staging/arcturus-oci-publish.sh"
   if [[ -x "$SOURCE_DIR/arcturusd" ]]; then
     install -m 0755 "$SOURCE_DIR/arcturusd" "$staging/arcturusd"
+  fi
+  if [[ -x "$SOURCE_DIR/arcturus-agent" ]]; then
+    install -m 0755 "$SOURCE_DIR/arcturus-agent" "$staging/arcturus-agent"
   fi
   if [[ -d "$SOURCE_DIR/wheelhouse" ]]; then
     cp -a "$SOURCE_DIR/wheelhouse" "$staging/wheelhouse"
@@ -570,6 +709,13 @@ mv -Tf "$STATE_DIR/current.new" "$STATE_DIR/current"
 
 rendered_config="$(mktemp)"
 cat >"$rendered_config" <<EOF
+ARCTURUS_CONFIG_ROOT=$ARCTURUS_PATH_CONFIG_ROOT
+ARCTURUS_DATA_ROOT=$ARCTURUS_PATH_DATA_ROOT
+ARCTURUS_CACHE_ROOT=$ARCTURUS_PATH_CACHE_ROOT
+ARCTURUS_RUNTIME_ROOT=$ARCTURUS_PATH_RUNTIME_ROOT
+ARCTURUS_CONFIG_DIR=$CONFIG_DIR
+ARCTURUS_RUNTIME_DIR=$RUNTIME_DIR
+ARCTURUS_WORKLOAD_ROOT=$WORKLOAD_ROOT
 ARCTURUS_STATE_DIR=$STATE_DIR
 ARCTURUS_QUADLET_DIR=$QUADLET_DIR
 ARCTURUS_SYSTEMD_DIR=$UNIT_DIR
@@ -588,10 +734,16 @@ install_managed_env "$rendered_config" "$CONFIG_FILE"
 
 rendered_platform="$(mktemp)"
 cat >"$rendered_platform" <<EOF
+ARCTURUS_CONFIG_ROOT=$ARCTURUS_PATH_CONFIG_ROOT
+ARCTURUS_DATA_ROOT=$ARCTURUS_PATH_DATA_ROOT
+ARCTURUS_CACHE_ROOT=$ARCTURUS_PATH_CACHE_ROOT
+ARCTURUS_RUNTIME_ROOT=$ARCTURUS_PATH_RUNTIME_ROOT
+ARCTURUS_RUNTIME_DIR=$RUNTIME_DIR
+ARCTURUS_WORKLOAD_ROOT=$WORKLOAD_ROOT
 BUS_SOCKET=$RUNTIME_DIR/bus.sock
 REGISTRY_SOCKET=$RUNTIME_DIR/registry.sock
 ROUTER_STATUS_FILE=$RUNTIME_DIR/router-status.json
-STACKS_DIR=$HOST_HOME/stacks
+STACKS_DIR=$WORKLOAD_ROOT
 ACTIVE_MANIFESTS_DIR=$STATE_DIR/active-manifests
 VHOSTS_DIR=$VHOSTS_DIR
 NGINX_CONTAINER=$NGINX_CONTAINER
@@ -702,12 +854,78 @@ else
   rm -f "$OCI_CONFIG_FILE" "$OCI_RUNTIME_ENV_FILE" "$ARCTURUSD_CONFIG_FILE"
 fi
 
-install -m 0644 "$release_path/arcturus-deployer@.service" "$UNIT_DIR/arcturus-deployer@.service"
-install -m 0644 "$release_path/arcturus-podman-api.service" "$UNIT_DIR/arcturus-podman-api.service"
-install -m 0644 "$release_path/arcturus-bus.service" "$UNIT_DIR/arcturus-bus.service"
-install -m 0644 "$release_path/arcturus-registry.service" "$UNIT_DIR/arcturus-registry.service"
-install -m 0644 "$release_path/arcturus-router.service" "$UNIT_DIR/arcturus-router.service"
-install -m 0644 "$release_path/arcturusd.service" "$ARCTURUSD_UNIT_FILE"
+if $FLEET_CONTROL_PLANE; then
+  [[ -x "$release_path/arcturusd" ]] || {
+    echo "Installed release is missing the arcturusd binary required for fleet control" >&2
+    exit 2
+  }
+  mkdir -p "$FLEET_STATE_DIR"
+  chmod 0700 "$FLEET_STATE_DIR"
+  rendered_fleet="$(mktemp)"
+  if [[ -f "$ARCTURUSD_CONFIG_FILE" ]]; then
+    grep -Ev '^ARCTURUSD_FLEET_|^ARCTURUSD_UPLOAD_AUTH_ENABLED=|^ARCTURUSD_LISTEN=' "$ARCTURUSD_CONFIG_FILE" >"$rendered_fleet" || true
+  fi
+  cat >>"$rendered_fleet" <<EOF
+ARCTURUS_CONFIG_ROOT=$ARCTURUS_PATH_CONFIG_ROOT
+ARCTURUS_DATA_ROOT=$ARCTURUS_PATH_DATA_ROOT
+ARCTURUS_CACHE_ROOT=$ARCTURUS_PATH_CACHE_ROOT
+ARCTURUS_RUNTIME_ROOT=$ARCTURUS_PATH_RUNTIME_ROOT
+ARCTURUS_CONFIG_DIR=$CONFIG_DIR
+ARCTURUS_RUNTIME_DIR=$RUNTIME_DIR
+ARCTURUSD_UPLOAD_AUTH_ENABLED=$([[ "$OCI_AUTH_ENABLED" == true ]] && printf true || printf false)
+ARCTURUSD_FLEET_ENABLED=true
+ARCTURUSD_LISTEN=$FLEET_LISTEN_ADDRESS:9190
+ARCTURUSD_FLEET_STATE_DB=$FLEET_STATE_DIR/state.sqlite3
+ARCTURUSD_FLEET_TOKENS_FILE=$FLEET_TOKEN_FILE
+EOF
+  install -m 0600 "$rendered_fleet" "$ARCTURUSD_CONFIG_FILE"
+  rm -f "$rendered_fleet"
+fi
+
+if $WORKER_AGENT; then
+  [[ -x "$release_path/arcturus-agent" ]] || {
+    echo "Installed release is missing the arcturus-agent binary" >&2
+    exit 2
+  }
+  mkdir -p "$AGENT_STATE_DIR" "$CONFIG_DIR/lifecycle-tokens"
+  chmod 0700 "$AGENT_STATE_DIR" "$CONFIG_DIR/lifecycle-tokens"
+  install -m 0600 "$WORKER_TOKEN_FILE" "$CONFIG_DIR/worker.token"
+  rendered_agent="$(mktemp)"
+  cat >"$rendered_agent" <<EOF
+ARCTURUS_CONFIG_ROOT=$ARCTURUS_PATH_CONFIG_ROOT
+ARCTURUS_DATA_ROOT=$ARCTURUS_PATH_DATA_ROOT
+ARCTURUS_CACHE_ROOT=$ARCTURUS_PATH_CACHE_ROOT
+ARCTURUS_RUNTIME_ROOT=$ARCTURUS_PATH_RUNTIME_ROOT
+ARCTURUS_CONFIG_DIR=$CONFIG_DIR
+ARCTURUS_RUNTIME_DIR=$RUNTIME_DIR
+ARCTURUS_CONTROL_PLANE_URL=$CONTROL_PLANE_URL
+ARCTURUS_WORKER_ID=$WORKER_ID
+ARCTURUS_WORKER_TOKEN_FILE=$CONFIG_DIR/worker.token
+ARCTURUS_AGENT_STATE_DB=$AGENT_STATE_DIR/state.sqlite3
+ARCTURUS_LIFECYCLE_API_URL=http://127.0.0.1:9090
+ARCTURUS_LIFECYCLE_TOKENS_DIR=$CONFIG_DIR/lifecycle-tokens
+EOF
+  install -m 0600 "$rendered_agent" "$AGENT_CONFIG_FILE"
+  rm -f "$rendered_agent"
+fi
+
+for unit in arcturus-deployer@.service arcturus-podman-api.service arcturus-bus.service \
+  arcturus-registry.service arcturus-router.service arcturusd.service arcturus-agent.service; do
+  rendered_unit="$(mktemp)"
+  "$PYTHON_BIN" "$release_path/arcturus_paths.py" \
+    --render-unit "$release_path/$unit" --output "$rendered_unit" \
+    --value "CONFIG_DIR=$CONFIG_DIR" \
+    --value "STATE_DIR=$STATE_DIR" \
+    --value "QUADLET_DIR=$QUADLET_DIR" \
+    --value "UNIT_DIR=$UNIT_DIR" \
+    --value "RUNTIME_DIR=$RUNTIME_DIR" \
+    --value "WORKLOAD_ROOT=$WORKLOAD_ROOT" \
+    --value "OCI_AUTH_STATE_DIR=$OCI_AUTH_STATE_DIR" \
+    --value "FLEET_STATE_DIR=$FLEET_STATE_DIR" \
+    --value "AGENT_STATE_DIR=$AGENT_STATE_DIR"
+  install -m 0644 "$rendered_unit" "$UNIT_DIR/$unit"
+  rm -f "$rendered_unit"
+done
 mkdir -p "$UNIT_DIR/arcturus-router.service.d"
 router_paths="$(mktemp)"
 cat >"$router_paths" <<EOF
@@ -717,6 +935,7 @@ EOF
 install -m 0644 "$router_paths" "$UNIT_DIR/arcturus-router.service.d/10-vhosts.conf"
 rm -f "$router_paths"
 install -m 0755 "$release_path/arcturusctl" "$BIN_DIR/arcturusctl"
+install -m 0755 "$release_path/arcturus_paths.py" "$BIN_DIR/arcturus_paths.py"
 
 podman network exists "$NETWORK" || podman network create "$NETWORK" >/dev/null
 if command -v loginctl >/dev/null 2>&1 && [[ "$(loginctl show-user "$HOST_USER" -p Linger --value 2>/dev/null || true)" != true ]]; then
@@ -770,7 +989,7 @@ if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
       exit 1
     }
   else
-    systemctl --user disable --now arcturusd.service >/dev/null 2>&1 || true
+    $FLEET_CONTROL_PLANE || systemctl --user disable --now arcturusd.service >/dev/null 2>&1 || true
   fi
   systemctl --user restart arcturus-oci-registry.service
   registry_ready=false
@@ -823,9 +1042,26 @@ if [[ -n "$OCI_REGISTRY_IMAGE" ]]; then
   fi
 else
   systemctl --user stop arcturus-oci-registry.service >/dev/null 2>&1 || true
-  systemctl --user disable --now arcturusd.service >/dev/null 2>&1 || true
+  $FLEET_CONTROL_PLANE || systemctl --user disable --now arcturusd.service >/dev/null 2>&1 || true
   rm -f "$OCI_QUADLET_FILE"
   systemctl --user daemon-reload
+fi
+if $FLEET_CONTROL_PLANE && ! $OCI_AUTH_ENABLED; then
+  systemctl --user enable arcturusd.service
+  systemctl --user restart arcturusd.service
+  fleet_ready=false
+  for _ in {1..30}; do
+    if curl --fail --silent "http://$FLEET_LISTEN_ADDRESS:9190/healthz" >/dev/null 2>&1; then
+      fleet_ready=true
+      break
+    fi
+    sleep 1
+  done
+  $fleet_ready || {
+    systemctl --user status arcturusd.service --no-pager -l >&2 || true
+    echo "Arcturus Rust fleet control plane did not become ready" >&2
+    exit 1
+  }
 fi
 if [[ -n "$OCI_TAILSCALE_SERVICE_TO_CLEAR" && "$OCI_TAILSCALE_SERVICE_TO_CLEAR" != "$OCI_TAILSCALE_SERVICE" ]]; then
   if command -v tailscale >/dev/null 2>&1; then
@@ -846,6 +1082,12 @@ else
 fi
 systemctl --user enable "${deployer_units[@]}"
 systemctl --user restart "${deployer_units[@]}"
+if $WORKER_AGENT; then
+  systemctl --user enable arcturus-agent.service
+  systemctl --user restart arcturus-agent.service
+else
+  systemctl --user disable --now arcturus-agent.service >/dev/null 2>&1 || true
+fi
 
 if $CONFIGURE_FIREWALL; then
   firewall_family="$("$PYTHON_BIN" - "$RUNNER_CIDR" <<'PY'

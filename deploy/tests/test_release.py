@@ -150,6 +150,30 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("schedule", encoded["spec"]["components"]["web"])
         self.assertNotIn("healthCheck", encoded["spec"]["components"]["assets"])
 
+    def test_fleet_characteristics_are_derived_from_authoritative_release(self):
+        raw = manifest()
+        raw["spec"]["components"]["web"]["secrets"] = [
+            {"name": "redis-url", "type": "env", "target": "REDIS_URL"}
+        ]
+        raw["spec"]["components"]["web"]["volumes"] = [
+            {"source": "/srv/static", "target": "/static", "readOnly": True}
+        ]
+        release = ServiceRelease.model_validate(raw)
+        characteristics = release.fleet_characteristics()
+        self.assertEqual(characteristics["serviceName"], "example-portal")
+        self.assertEqual(characteristics["releaseDigest"], release.digest())
+        self.assertEqual(characteristics["componentModes"], ["oneshot", "service"])
+        self.assertEqual(characteristics["readOnlyLocalVolumes"], 1)
+        self.assertEqual(characteristics["writableLocalVolumes"], 1)
+        self.assertEqual(characteristics["secretUses"][0]["secretName"], "redis-url")
+
+    def test_canonical_fleet_fixture_matches_authoritative_characteristics(self):
+        repository = Path(__file__).resolve().parents[2]
+        payload = json.loads((repository / "rust/fixtures/fleet/workload-intent.json").read_text())
+        release = ServiceRelease.model_validate(payload["release"])
+        self.assertEqual(payload["releaseDigest"], release.digest())
+        self.assertEqual(payload["releaseCharacteristics"], release.fleet_characteristics())
+
     def test_requires_digest_pinned_image(self):
         raw = manifest()
         raw["spec"]["components"]["web"]["image"] = "registry.example.org/example/portal:latest"

@@ -19,7 +19,7 @@ services:
       - ${ARCTURUS_VHOSTS_DIR:-../portal/config/nginx/vhosts.d}:/data/portal/vhosts.d
       - ${ARCTURUS_STREAMS_DIR:-../portal/config/nginx/streams.d}:/data/portal/streams.d
       - ${ARCTURUS_STATE_DIR:-./state}:/data/state
-      - ${PODMAN_SOCKET:-/run/user/1000/arcturus/podman.sock}:/var/run/docker.sock
+      - ${PODMAN_SOCKET:?Set PODMAN_SOCKET to the Arcturus rootless Podman socket}:/var/run/docker.sock
     security_opt:
       - label:disable
     networks:

@@ -1,0 +1,20 @@
+[Unit]
+Description=Arcturus outbound worker agent
+After=network-online.target arcturus-deployer@127.0.0.1.service
+Wants=network-online.target arcturus-deployer@127.0.0.1.service
+
+[Service]
+Type=simple
+EnvironmentFile="@CONFIG_DIR@/agent.env"
+ExecStart="@STATE_DIR@/current/arcturus-agent"
+Restart=always
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths="@AGENT_STATE_DIR@" "@RUNTIME_DIR@"
+
+[Install]
+WantedBy=default.target

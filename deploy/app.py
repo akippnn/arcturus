@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header, Response
 from pydantic import BaseModel, Field, field_validator
 
+from arcturus_paths import resolve_paths
 from release import DeploymentFailure, DeploymentRequest, ReleaseDeployer, ServiceRelease, redact
 
 load_dotenv()
@@ -36,8 +37,11 @@ ARCTURUS_FEATURES = [
     "manifest-v1-safe-routing-mirror",
     "manifest-v1-provenance-routing",
     "legacy-v1-service-scoped-deploy",
+    "xdg-fhs-four-root-layout",
+    "dist-001-multi-workload-fleet-foundation",
 ]
 
+PATHS = resolve_paths()
 STACKS_BASE = Path(os.getenv("STACKS_BASE_DIR", "/data/stacks"))
 PORTAL_VHOSTS = Path(os.getenv("PORTAL_VHOSTS_DIR", "/data/portal/vhosts.d"))
 PORTAL_STREAMS = Path(os.getenv("PORTAL_STREAMS_DIR", "/data/portal/streams.d"))
@@ -47,22 +51,22 @@ NGINX_CONTAINER = os.getenv("NGINX_CONTAINER", "portal-nginx")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 TOKEN_FILE = Path(
-    os.getenv("RUNNER_TOKENS_FILE", Path.home() / ".config/arcturus/tokens.json")
+    os.getenv("RUNNER_TOKENS_FILE", PATHS.config_dir / "tokens.json")
 )
 LEGACY_TOKEN_FILE = Path(
-    os.getenv("LEGACY_RUNNER_TOKENS_FILE", Path.home() / "stacks/.runner-data/tokens.json")
+    os.getenv("LEGACY_RUNNER_TOKENS_FILE", PATHS.workload_root / ".runner-data/tokens.json")
 )
 LEGACY_ALLOW_MUTABLE_MAIN = os.getenv("ARCTURUS_LEGACY_ALLOW_MUTABLE_MAIN", "0") == "1"
 LEGACY_STATE_DIR = Path(
     os.getenv(
         "ARCTURUS_LEGACY_STATE_DIR",
-        Path.home() / ".local/share/arcturus-deployer/legacy-v1",
+        PATHS.deployer_state_dir / "legacy-v1",
     )
 )
 V2_STATE_DB = Path(
     os.getenv(
         "ARCTURUS_V2_STATE_DB",
-        Path.home() / ".local/share/arcturus-deployer/state.sqlite3",
+        PATHS.deployer_state_dir / "state.sqlite3",
     )
 )
 
@@ -235,6 +239,8 @@ def verify_auth(authorization: str | None = Header(None)):
         try:
             for record in _token_records():
                 if _token_matches(record, token):
+                    if "fleet-operator" in (record.get("audiences") or []):
+                        continue
                     return
         except Exception as e:
             print(json.dumps({"event": "token_file_error", "error": redact(str(e))}))
@@ -262,7 +268,7 @@ def authorize_service(authorization: str | None, service: str) -> None:
         try:
             for item in _token_records():
                 if _token_matches(item, token):
-                    scopes = item.get("services") or ["*"]
+                    scopes = item["services"] if "services" in item else ["*"]
                     if "*" not in scopes and service not in scopes:
                         raise HTTPException(403, f"Token is not authorized for {service}")
                     return

@@ -16,9 +16,11 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
+from arcturus_paths import resolve_paths
 from release import DeploymentRequest, HealthCheck, QuadletRenderer, ServiceRelease
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -321,10 +323,17 @@ def write_secure_json(path: Path, value: Any) -> None:
     os.replace(temporary, path)
 
 
+def arcturus_config_dir(environment: Mapping[str, str] = os.environ) -> Path:
+    return resolve_paths(environment).config_dir
+
+
 def load_token(args: argparse.Namespace) -> str:
     token_file = args.token_file or os.getenv("ARCTURUS_TOKEN_FILE")
     if token_file:
-        return Path(token_file).read_text().strip()
+        path = Path(token_file).expanduser()
+        if not path.is_file():
+            raise SystemExit(f"token file is missing: {path}")
+        return path.read_text().strip()
     token = os.getenv("ARCTURUS_DEPLOY_TOKEN", "")
     if token:
         return token
@@ -338,7 +347,7 @@ def api_request(
     body: dict[str, Any] | None = None,
     *,
     authenticated: bool = True,
-) -> dict[str, Any]:
+) -> Any:
     base_url = (args.api_url or os.getenv("ARCTURUS_API_URL", "http://127.0.0.1:9090")).rstrip("/")
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Content-Type": "application/json"}
@@ -363,7 +372,11 @@ def api_request(
             detail = message.strip() or "<empty response body>"
         hint = ""
         if exc.code == 401:
-            hint = "\nThe API is reachable, but ARCTURUS_DEPLOY_TOKEN is missing or invalid."
+            hint = (
+                "\nThe API is reachable, but the fleet operator token is invalid."
+                if path.startswith("/v1/fleet/")
+                else "\nThe API is reachable, but ARCTURUS_DEPLOY_TOKEN is missing or invalid."
+            )
         elif exc.code == 403:
             hint = "\nThe token is valid but is not scoped to the requested service."
         elif exc.code == 424:
@@ -393,7 +406,7 @@ def api_request(
         raise SystemExit(f"Arcturus API returned HTTP {exc.code}:\n{detail}{hint}") from exc
     except urllib.error.URLError as exc:
         raise SystemExit(f"Arcturus API request failed: {exc.reason}") from exc
-    if result.get("status") == "failed":
+    if isinstance(result, dict) and result.get("status") == "failed":
         raise SystemExit(json.dumps(result, sort_keys=True))
     return result
 
@@ -804,15 +817,16 @@ def command_token_create(args: argparse.Namespace) -> None:
     token_id = args.token_id or secrets.token_hex(8)
     if any(item.get("id") == token_id for item in payload["tokens"]):
         raise SystemExit(f"token id already exists: {token_id}")
-    payload["tokens"].append(
-        {
-            "id": token_id,
-            "algorithm": "scrypt",
-            "salt": base64.urlsafe_b64encode(salt).decode(),
-            "hash": base64.urlsafe_b64encode(digest).decode(),
-            "services": args.service,
-        }
-    )
+    record = {
+        "id": token_id,
+        "algorithm": "scrypt",
+        "salt": base64.urlsafe_b64encode(salt).decode(),
+        "hash": base64.urlsafe_b64encode(digest).decode(),
+        "services": args.service or [],
+    }
+    if args.fleet_operator:
+        record["audiences"] = ["fleet-operator"]
+    payload["tokens"].append(record)
     with tempfile.NamedTemporaryFile("w", dir=database.parent, delete=False) as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
@@ -841,6 +855,88 @@ def add_api_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--api-url")
     parser.add_argument("--token-file")
     parser.add_argument("--timeout", type=int, default=330)
+
+
+def add_fleet_api_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--api-url",
+        default=os.getenv("ARCTURUS_FLEET_API_URL", "http://127.0.0.1:9190"),
+    )
+    parser.add_argument(
+        "--token-file",
+        default=os.getenv("ARCTURUS_FLEET_TOKEN_FILE")
+        or str(arcturus_config_dir() / "fleet-operator.token"),
+    )
+    parser.add_argument("--timeout", type=int, default=330)
+
+
+def command_fleet_worker_enroll(args: argparse.Namespace) -> None:
+    topology: dict[str, str] = {}
+    for item in args.topology:
+        if "=" not in item:
+            raise SystemExit("--topology must use key=value")
+        key, value = item.split("=", 1)
+        topology[key] = value
+    payload = {
+        "workerId": args.worker_id,
+        "displayName": args.display_name,
+        "capabilities": sorted(set(args.capability)),
+        "topology": topology,
+    }
+    result = api_request(args, "POST", "/v1/fleet/workers", payload)
+    if args.credential_output:
+        destination = Path(args.credential_output).expanduser()
+        if destination.exists():
+            raise SystemExit(f"refusing to overwrite worker credential: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(result.pop("credential") + "\n")
+        result["credentialFile"] = str(destination)
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def command_fleet_worker_list(args: argparse.Namespace) -> None:
+    print(json.dumps(api_request(args, "GET", "/v1/fleet/workers"), indent=2, sort_keys=True))
+
+
+def command_fleet_resource_import(args: argparse.Namespace) -> None:
+    payload = json.loads(Path(args.resource).read_text())
+    resource_id = payload.get("resourceId")
+    if not isinstance(resource_id, str):
+        raise SystemExit("resource file must contain resourceId")
+    print(json.dumps(api_request(args, "PUT", f"/v1/fleet/resources/{resource_id}", payload), indent=2, sort_keys=True))
+
+
+def command_fleet_service_apply(args: argparse.Namespace) -> None:
+    payload = json.loads(Path(args.intent).read_text())
+    release = ServiceRelease.model_validate(payload.get("release"))
+    payload["release"] = release.model_dump(mode="json", exclude_none=True)
+    payload["releaseDigest"] = release.digest()
+    payload["releaseCharacteristics"] = release.fleet_characteristics()
+    workload = payload.get("workloadName")
+    if workload != release.metadata.name:
+        raise SystemExit("workloadName must match the ServiceRelease service name")
+    result = api_request(args, "PUT", f"/v1/fleet/workloads/{workload}", payload)
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def command_fleet_service_list(args: argparse.Namespace) -> None:
+    print(json.dumps(api_request(args, "GET", "/v1/fleet/workloads"), indent=2, sort_keys=True))
+
+
+def command_fleet_service_get(args: argparse.Namespace) -> None:
+    suffix = "/explain" if args.action == "explain" else ""
+    print(json.dumps(api_request(args, "GET", f"/v1/fleet/workloads/{args.service}{suffix}"), indent=2, sort_keys=True))
+
+
+def command_fleet_service_move(args: argparse.Namespace) -> None:
+    payload = {
+        "expectedIntentGeneration": args.expected_generation,
+        "workerId": args.worker_id,
+        "architecture": args.architecture,
+    }
+    print(json.dumps(api_request(args, "POST", f"/v1/fleet/workloads/{args.service}/moves", payload), indent=2, sort_keys=True))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -943,6 +1039,49 @@ def build_parser() -> argparse.ArgumentParser:
     host_status.add_argument("--backup-unit")
     host_status.add_argument("--backup-max-age-hours", type=float, default=24)
     host_status.set_defaults(func=command_host_status)
+    fleet = subparsers.add_parser("fleet")
+    fleet_subparsers = fleet.add_subparsers(required=True)
+    fleet_worker = fleet_subparsers.add_parser("worker")
+    fleet_worker_subparsers = fleet_worker.add_subparsers(required=True)
+    fleet_worker_enroll = fleet_worker_subparsers.add_parser("enroll")
+    fleet_worker_enroll.add_argument("worker_id")
+    fleet_worker_enroll.add_argument("--display-name")
+    fleet_worker_enroll.add_argument("--capability", action="append", default=[])
+    fleet_worker_enroll.add_argument("--topology", action="append", default=[])
+    fleet_worker_enroll.add_argument("--credential-output")
+    add_fleet_api_options(fleet_worker_enroll)
+    fleet_worker_enroll.set_defaults(func=command_fleet_worker_enroll)
+    fleet_worker_list = fleet_worker_subparsers.add_parser("list")
+    add_fleet_api_options(fleet_worker_list)
+    fleet_worker_list.set_defaults(func=command_fleet_worker_list)
+    fleet_resource = fleet_subparsers.add_parser("resource")
+    fleet_resource_subparsers = fleet_resource.add_subparsers(required=True)
+    fleet_resource_import = fleet_resource_subparsers.add_parser("import")
+    fleet_resource_import.add_argument("resource")
+    add_fleet_api_options(fleet_resource_import)
+    fleet_resource_import.set_defaults(func=command_fleet_resource_import)
+    fleet_service = fleet_subparsers.add_parser("service")
+    fleet_service_subparsers = fleet_service.add_subparsers(required=True)
+    fleet_service_apply = fleet_service_subparsers.add_parser("apply")
+    fleet_service_apply.add_argument("intent")
+    add_fleet_api_options(fleet_service_apply)
+    fleet_service_apply.set_defaults(func=command_fleet_service_apply)
+    fleet_service_list = fleet_service_subparsers.add_parser("list")
+    add_fleet_api_options(fleet_service_list)
+    fleet_service_list.set_defaults(func=command_fleet_service_list)
+    for action in ("status", "explain"):
+        fleet_service_get = fleet_service_subparsers.add_parser(action)
+        fleet_service_get.add_argument("service")
+        add_fleet_api_options(fleet_service_get)
+        fleet_service_get.set_defaults(func=command_fleet_service_get, action=action)
+    fleet_service_move = fleet_service_subparsers.add_parser("move")
+    fleet_service_move.add_argument("service")
+    fleet_service_move.add_argument("--expected-generation", required=True, type=int)
+    destination = fleet_service_move.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--worker-id")
+    destination.add_argument("--architecture")
+    add_fleet_api_options(fleet_service_move)
+    fleet_service_move.set_defaults(func=command_fleet_service_move)
     operation = subparsers.add_parser("operation")
     operation.add_argument("operation_id")
     add_api_options(operation)
@@ -960,7 +1099,9 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--database", required=True)
     create.add_argument("--output", required=True)
     create.add_argument("--token-id")
-    create.add_argument("--service", action="append", required=True)
+    token_scope = create.add_mutually_exclusive_group(required=True)
+    token_scope.add_argument("--service", action="append")
+    token_scope.add_argument("--fleet-operator", action="store_true")
     create.set_defaults(func=command_token_create)
     revoke = token_subparsers.add_parser("revoke")
     revoke.add_argument("--database", required=True)

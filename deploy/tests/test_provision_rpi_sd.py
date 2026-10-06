@@ -351,11 +351,13 @@ domain_name_server (ip_mult): {192.168.1.1, 192.168.68.1}
                 patch.object(provision, "pick_disk", return_value=disk),
                 patch.object(provision, "discover_macos_network", return_value=context),
                 patch.object(provision, "address_responds", return_value=False),
+                patch.object(provision, "run") as command,
                 patch.object(provision, "pick_image") as pick_image,
                 patch.object(provision, "download_verified") as download,
                 patch.object(provision, "flash_image") as flash,
                 redirect_stdout(output),
             ):
+                command.return_value.stdout = ""
                 self.assertEqual(provision.main(argv), 0)
             pick_image.assert_not_called()
             download.assert_not_called()

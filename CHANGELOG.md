@@ -1,8 +1,77 @@
+---
+title: Changelog
+kind: reference
+lifecycle: stable
+authority: Chronological public release history
+summary: Notable public changes grouped by product release.
+maintenance:
+  - A notable public behavior changes or a release is cut.
+nav:
+  section: Reference
+  order: 49
+---
+
 # Changelog
 
 All notable public changes to Arcturus are documented here. The project follows semantic versioning for product releases; manifest API versions are tracked separately.
 
 ## [Unreleased]
+
+## [4.0.0-alpha.1] - 2026-09-13
+
+This breaking preview is nicknamed “Four Roots”: every host path is derived
+from independent configuration, data, cache, and runtime roots. The jump to
+major version 4 makes the filesystem and fleet-management compatibility break
+explicit while `ServiceRelease v2` remains unchanged and independently
+versioned.
+
+### Added
+
+- DIST-001 Rust fleet contracts, persistent control-plane state, and an
+  outbound worker agent that durably reconciles multiple independent
+  `ServiceRelease v2` assignments
+- Worker enrollment, heartbeat, measured inventory/pressure, hard placement,
+  candidate refusal explanations, observed state, and fail-closed target-first
+  movement
+- Fleet-level imported-resource identity and bindings to existing Podman secret
+  references while applications retain native protocols such as RESP
+- Fleet operator commands for worker enrollment/listing, resource import,
+  service apply/list/status/explain, and explicit movement
+- Centralized XDG/FHS path resolution plus bundle and user-systemd installation
+  support for fleet-control and worker-agent roles
+- A guarded macOS Raspberry Pi SD-card provisioner with removable-media
+  validation, live network/static-address selection, official AlmaLinux image
+  discovery and checksum verification, cloud-init SSH key authorization, and
+  automatic first-boot Arcturus worker installation
+
+### Changed
+
+- Arcturus now describes its distributed layer as additive around the existing
+  `ServiceRelease v2 -> Podman -> Quadlet -> systemd` lifecycle; the release
+  remains the atomic placement and rollback boundary
+- Fleet-operator, worker, and service lifecycle credentials have separate
+  audiences and authority
+- Python, Rust, Node, the installer, updater, CLI wrapper, and generated user
+  units now share the XDG/FHS path contract; changing roots never silently
+  relocates live SQLite or registry state
+- Host update replay retains distributed-role and filesystem-layout arguments
+  and installs a small layout locator beside the updater
+
+### Compatibility
+
+- Ordinary rootless defaults remain the existing `~/.config` and
+  `~/.local/share` locations when XDG variables are unset
+- Explicit final-directory variables remain supported for existing hosts
+- Selecting a new root while recorded or historical rootless state is present
+  but not migrated fails closed with a documented, non-destructive procedure
+
+### Not yet accepted
+
+- The DIST-001 source and local automated gates are complete, but its physical
+  arm64/amd64 Podman/systemd/Redis recovery and movement run remains pending
+- Scored scheduling, replicas, automatic failover, state migration, managed
+  provider provisioning, backup orchestration, and distributed control-plane HA
+  remain deferred
 
 ## [1.0.0-rc.2] - 2026-07-18
 

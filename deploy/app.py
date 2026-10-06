@@ -24,7 +24,7 @@ load_dotenv()
 
 app = FastAPI(title="Arcturus Deploy Service")
 
-ARCTURUS_PRODUCT_VERSION = "1.0.0-rc.2"
+ARCTURUS_PRODUCT_VERSION = "4.0.0-alpha.1"
 ARCTURUS_FEATURES = [
     "authenticated-preflight",
     "legacy-compose-handoff",

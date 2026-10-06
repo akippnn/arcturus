@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "arcturus-agent"
-version = "1.0.0-rc.2"
+version = "4.0.0-alpha.1"
 dependencies = [
  "arcturus-contracts",
  "arcturus-paths",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "arcturus-auth"
-version = "1.0.0-rc.2"
+version = "4.0.0-alpha.1"
 dependencies = [
  "arcturus-contracts",
  "base64",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "arcturus-contracts"
-version = "1.0.0-rc.2"
+version = "4.0.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "arcturus-paths"
-version = "1.0.0-rc.2"
+version = "4.0.0-alpha.1"
 dependencies = [
  "libc",
  "serde_json",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "arcturusd"
-version = "1.0.0-rc.2"
+version = "4.0.0-alpha.1"
 dependencies = [
  "arcturus-auth",
  "arcturus-contracts",

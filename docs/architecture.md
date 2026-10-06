@@ -1,96 +1,109 @@
+---
+title: Architecture
+kind: architecture
+lifecycle: stable
+authority: System-wide architecture boundaries
+summary: How operators, the control plane, workers, workloads, and resources fit together.
+maintenance:
+  - A system ownership boundary or architectural invariant changes.
+nav:
+  section: Start here
+  order: 1
+---
+
 # Arcturus architecture
 
-Arcturus is a single-host application platform. It separates image construction, release declaration, host activation, and public ingress so that each layer has one owner.
+Arcturus is a distributed application and infrastructure platform built around
+an established host-local Podman, Quadlet, and systemd lifecycle. This page
+owns the system-wide boundaries; subsystem documents own their detailed
+contracts, and [Status](status.md) owns no architecture at all.
 
-## Design goals
+## System topology
 
-- Immutable, digest-pinned application releases
-- Rootless runtime ownership through Podman Quadlet and user systemd
-- One validated manifest as the application release source of truth
-- Deterministic rendering and generator validation before activation
-- Health-gated promotion and automatic restoration of the last healthy release
-- Explicit secret, storage, routing, and lifecycle ownership
-- No production dependency on a mutable source checkout
+Operators submit desired state to a persistent control plane. Workers pull
+assignments and apply them locally. Application traffic goes directly to its
+resources instead of through Arcturus.
 
-## Components
+```mermaid
+flowchart LR
+  O["Operator<br/>arcturusctl or CI"] --> C["Fleet control plane"]
+  W["Worker agent"] -->|outbound reconciliation| C
+  C <--> D[("Fleet state")]
+  W --> L["ServiceRelease v2 lifecycle"]
+  L --> P["Podman → Quadlet → systemd"]
+  P --> A["OCI workload"]
+  A -->|RESP, S3, SQL, HTTP, TCP, or UDP| R["Physical or external resource"]
+```
 
-| Component | Responsibility |
-| --- | --- |
-| Application repository | Source code, tests, Containerfiles, project build graph, and release template |
-| CI | Test, build, push, resolve digests, render a concrete release, and call the deployment API |
-| Deployment API | Authenticate the service identity and serialize deployment/lifecycle operations |
-| Release engine | Validate, pre-pull, inspect, render, archive, activate, verify, and roll back releases |
-| Quadlet/systemd | Own containers, networks, volumes, ordering, timers, restart policy, and boot persistence |
-| Active-manifest store | Publish the currently selected release for registry and routing consumers |
-| Bus and registry | Detect active-release changes and expose normalized routing state |
-| Router | Generate vhosts safely, test/reload nginx, restore previous configuration on failure, and publish receipts |
-| Ingress | Operator-owned TLS termination and public traffic handling |
+The control plane owns durable intent and placement decisions. Operator
+clients are transient. Git may store desired configuration or trigger
+automation, but it does not execute or reconcile workloads.
 
-## Release flow
+## Ownership planes
 
-### Target Arcturus-owned artifact flow
+```mermaid
+flowchart TB
+  M["Management<br/>authenticated operator intent"] --> F["Fleet<br/>placement and assignment"]
+  F --> E["Worker execution<br/>release lifecycle"]
+  E --> D["Application data<br/>native resource protocols"]
+  D -.-> X["No generic Arcturus data proxy"]
+```
 
-1. GitHub Actions validates application code and every configured image target.
-2. CI requests a short-lived upload grant scoped to one service, revision, and exact component repositories.
-3. CI pushes OCI manifests and blobs directly to the private Arcturus endpoint over Tailscale.
-4. Arcturus independently verifies manifests, descriptors, sizes, digests, and ownership, then records immutable artifact receipts.
-5. A deployment may reference only receipts accepted for the same service, component, and Git revision.
-6. The lifecycle service renders Quadlet and systemd units, activates them, verifies readiness, publishes routing state, and restores the previous healthy release on failure.
+- Management accepts and explains operator intent.
+- Fleet state records workers, resources, decisions, assignments, and
+  observations.
+- Worker execution mutates only the local host through the existing lifecycle.
+- Applications and providers retain their native data protocols and semantics.
 
-### Compatibility and lifecycle boundary
+## Release boundary
 
-Artifact completion and receipt enforcement are implemented for images hosted by the configured Arcturus registry. The unchanged manifest-v2 lifecycle requires an accepted receipt bound to the same service, component, repository, Git revision, and digest before preflight may activate an Arcturus-owned image.
+The distributed layer wraps one complete `ServiceRelease v2`. It does not
+redefine that release or split its components across workers.
 
-Existing projects may still push images to an external registry and submit digest-pinned references. The Python/FastAPI lifecycle service pre-pulls and verifies those images before activation. This bounded compatibility path remains available for migration and emergency recovery. Rust does not yet own activation, rollback, or recovery.
+```mermaid
+flowchart LR
+  I["WorkloadIntent"] --> P["PlacementDecision"]
+  P --> A["WorkerAssignment"]
+  A --> R["ServiceRelease v2"]
+  R --> L["Local lifecycle"]
+  L --> S["Podman / Quadlet / systemd"]
+  S --> O["ObservedState"]
+```
 
-## Workload modes
+Existing local services remain independent until an operator explicitly
+adopts them into fleet intent.
 
-- `service` — web servers, workers, queue consumers, and other continuously running containers.
-- `oneshot` — migrations, initialization, asset export, and other completion dependencies.
-- `scheduled` — one-shot containers invoked by a generated systemd timer.
+## Hybrid infrastructure
 
-A multi-component application can combine all three modes and order them with `dependsOn`.
+Compute and resource placement are separate. A Pi may use an external database
+or object store; an x86 worker may host a latency-sensitive resource; moving
+stateless compute need not move its data.
 
-## Host layout
+```mermaid
+flowchart LR
+  PI["Pi application worker"] --> DB["External PostgreSQL"]
+  PI --> OBJ["R2 or S3"]
+  PI --> CACHE["Valkey on another worker"]
+  GAME["Game server on x86"] --> LOCAL["Attested local durable state"]
+  LOCAL -.->|separate protection policy| OBJ
+```
 
-Paths are rooted in the service account home directory unless overridden by installation configuration.
+Arcturus models identity, lifecycle ownership, binding, and placement
+requirements. It does not pretend that Redis, PostgreSQL, S3, D1, Turso, and
+Firebase are interchangeable.
 
-| Path | Contents |
-| --- | --- |
-| `~/.local/share/arcturus-deployer/` | SQLite audit/operation state and deployer data |
-| `~/.local/share/arcturus-deployer/releases/<service>/` | Immutable rendered release archives |
-| `~/.local/share/arcturus-deployer/active-manifests/<service>/arcturus.json` | Current release publication |
-| `~/.config/containers/systemd/arcturus/` | Active Quadlet symlinks |
-| `~/.config/systemd/user/` | Service targets and Arcturus control-plane units |
-| `$XDG_RUNTIME_DIR/arcturus/` | Private Podman, bus, and registry sockets plus router status |
+## Invariants
 
-## Networking and ingress
+- Applications remain ordinary OCI workloads.
+- `ServiceRelease v2` is the atomic worker-local lifecycle and rollback unit.
+- Workers initiate fleet communication and mutate only their own hosts.
+- Only explicit desired state removes a fleet-managed workload.
+- One workload's failure does not disturb unrelated workloads.
+- Compute placement does not imply resource placement.
+- Measured hardware facts and operator attestations remain distinct.
+- Backup, replication, redundancy, failover, and cache reconstruction are
+  separate concerns.
 
-Applications use declared Podman networks. Routed components normally join the external `internal_routing` network so the operator-owned ingress can resolve container names. Internal components can use application-specific networks without publishing a route.
-
-The router accepts only validated domains, aliases, ports, runtime names, and bounded nginx options. Apex ownership is denied unless `ARCTURUS_APEX_SERVICE` explicitly names the owning service. A failed nginx test or reload restores the prior configuration and records a redacted failure receipt.
-
-Arcturus does not issue certificates or require one specific public ingress implementation. The included portal configuration is a compatibility example, not an application lifecycle owner.
-
-## State and rollback
-
-Release directories are immutable after creation. Activation changes generated runtime ownership, not application data. Rollback switches the active release selection and restarts the generated target.
-
-Deployment, rollback, disable, enable, and remove do not delete:
-
-- bind-mounted application data
-- external named volumes
-- Podman secrets
-- release archives
-- audit and operation records
-
-Destructive storage operations must be separate and explicit.
-
-## Trust boundaries
-
-- A CI token is scoped to one service and should be stored only in protected CI secret storage.
-- The deployment API is powerful and must remain on loopback or a private network with source restrictions.
-- The rootless Podman API socket is dedicated to Arcturus control-plane services and must not be exposed to untrusted jobs.
-- Application manifests can request commands and host bind mounts, so repository write access is equivalent to deployment authority for that service.
-- Public ingress, DNS, backup, and host administration remain separate operational trust domains; application OCI storage is moving under Arcturus ownership.
-- Legacy `/deploy`, Terraform provisioners, and runner socket access carry broader authority and should be removed after migration.
+See [Distributed fleet](distributed-fleet.md), [Resources and
+persistence](resources-and-persistence.md), [Security](security.md), and
+[Filesystem layout](filesystem-layout.md) for the owning subsystem contracts.

@@ -1,3 +1,16 @@
+---
+title: Release image-size policy
+kind: policy
+lifecycle: stable
+authority: Release image resource policy
+summary: Accepted image size and bounded verification rules.
+maintenance:
+  - Image limits or verification policy changes.
+nav:
+  section: Reference
+  order: 36
+---
+
 # Release image-size policy
 
 Arcturus exposes an authenticated pre-upload policy endpoint so CI can reject oversized release images before sending layers to a container registry.

@@ -1,0 +1,8 @@
+[project]
+name = "vertical-slices-tooling"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "jsonschema==4.23.0",
+    "PyYAML==6.0.2",
+]

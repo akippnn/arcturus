@@ -1,8 +1,29 @@
+---
+title: Host updates
+kind: guide
+lifecycle: operational
+authority: Supported host update procedure
+summary: Update installed Arcturus hosts while preserving layout and state.
+maintenance:
+  - Update, rollback, or bundle behavior changes.
+nav:
+  section: Operate Arcturus
+  order: 22
+---
+
 # Updating an Arcturus host
 
-`deploy/arcturus-host-update` is the current compatibility updater. It persists only non-secret host installation arguments, installs itself into `~/.local/bin`, and replays those arguments against a digest-pinned OCI bundle or a local release directory. The target stable updater will verify and install signed host bundles published by GitHub Releases; that bootstrap path is not yet implemented.
+`deploy/arcturus-host-update` is the current compatibility updater. It persists
+only non-secret host installation arguments, installs itself into the resolved
+binary directory, and replays those arguments against a digest-pinned OCI
+bundle or a local release directory. The target stable updater will verify and
+install signed host bundles published by GitHub Releases; that bootstrap path
+is not yet implemented.
 
-The underlying `install-host.sh` behavior is unchanged: a release is staged under `~/.local/share/arcturus-deployer/releases/`, the `current` symlink is switched atomically, existing configuration is preserved unless explicitly replaced, user units are refreshed, and the services are restarted through user systemd.
+The underlying `install-host.sh` stages releases below the resolved deployer
+data directory, switches the `current` symlink atomically, preserves existing
+configuration unless explicitly replaced, refreshes generated user units, and
+restarts services through user systemd.
 
 ## Record the first installation
 
@@ -24,9 +45,10 @@ The wrapper forwards all options to `install-host.sh`, then writes:
 
 | Path | Purpose |
 | --- | --- |
-| `~/.config/arcturus/host-install.json` | Current bundle/source, replayable non-secret installer arguments, last command, and updater checksum |
-| `~/.local/share/arcturus-deployer/host-install-history.jsonl` | Append-only successful host installation/update history |
-| `~/.local/bin/arcturus-host-update` | Stable operator command for later upgrades |
+| `<config-root>/arcturus/host-install.json` | Current bundle/source, replayable non-secret installer arguments, last command, and updater checksum |
+| `<data-root>/arcturus-deployer/host-install-history.jsonl` | Append-only successful host installation/update history |
+| `<bin-dir>/arcturus-host-update` | Stable operator command for later upgrades |
+| `<bin-dir>/arcturus-layout.json` | Protected bootstrap locator for the configured directories |
 
 Both state files are mode `0600`; their parent directories are mode `0700`. Deployment tokens, registry credentials, application secrets, and token-file contents are never accepted or stored by the updater.
 
@@ -48,7 +70,9 @@ sudo -iu appsvc arcturus-host-update apply \
   --dry-run
 ```
 
-When the updater is running from `~/.local/bin`, it pulls the new bundle, extracts that bundle's own `install-host.sh`, and uses it for the upgrade. This avoids relying on a stale Git checkout.
+When the updater is running from its installed binary directory, it pulls the
+new bundle, extracts that bundle's own installer and path resolver, and uses
+them for the upgrade. This avoids relying on a stale Git checkout.
 
 ## Apply an upgrade
 
@@ -81,6 +105,16 @@ The output includes the installed source, application time, last exact update co
 ## Change host configuration
 
 `apply` intentionally changes only the Arcturus release source and transient validation flags. To change listeners, routing, bind roots, firewall settings, or other persistent installer arguments, rerun `bootstrap` with the complete desired host configuration. A successful bootstrap replaces the saved replay contract; a failed installation does not modify it.
+
+The replay contract includes the four filesystem roots, binary/workload roots,
+and DIST-001 fleet-control/worker-agent role flags. A layout locator installed
+beside the updater lets it find the saved configuration even when XDG variables
+are not exported in a later shell. Secret values are never persisted.
+
+Changing a root is a state migration, not an ordinary update. Follow
+[Filesystem layout](filesystem-layout.md); the installer refuses to make
+recorded or historical rootless state disappear merely because a new root
+points at an empty directory.
 
 ## Recovery
 

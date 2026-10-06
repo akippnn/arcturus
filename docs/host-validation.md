@@ -1,3 +1,16 @@
+---
+title: Host validation and issue reporting
+kind: guide
+lifecycle: operational
+authority: Host validation and diagnostic procedure
+summary: Validate a host and gather safe diagnostic evidence.
+maintenance:
+  - Validation commands, supported roles, or diagnostic guidance change.
+nav:
+  section: Operate Arcturus
+  order: 23
+---
+
 # Host validation and issue reporting
 
 Arcturus is designed so a host update can be reproduced, inspected, and reported without relying on hidden state. This playbook is the acceptance test for a control-plane update and the preferred evidence bundle for a public issue.
@@ -19,6 +32,30 @@ A successful installer exit is necessary, but it is not the complete health sign
 - public endpoint results are interpreted together with access-control and application behavior.
 
 `active (running)` alone is not sufficient. A long-running service may remain active while its polling or reconciliation loop fails repeatedly.
+
+## Distributed-role validation
+
+When the host runs the fleet control plane or worker agent, validate those roles
+in addition to the host-local checks below:
+
+```bash
+systemctl --user status arcturusd.service       # fleet control plane
+systemctl --user status arcturus-agent.service  # worker
+journalctl --user -u arcturus-agent.service -n 200 --no-pager
+arcturusctl fleet worker list
+```
+
+An enrolled worker should show fresh server-received heartbeat state and the
+expected normalized architecture. Use `fleet service status` to compare intent,
+decision, every source/target assignment, transition phase, and observed state;
+use `fleet service explain` to preserve candidate-specific refusal evidence.
+
+Do not claim distributed acceptance from a same-host or mocked run. DIST-001's
+owner-visible gate requires the two physical architectures, container-kill
+recovery, normal RESP access to imported Redis, target health before source
+withdrawal, and continued cached workload operation during control-plane loss.
+Follow the [DIST-001 physical runbook](slices/DIST-001/runbook.md) and record
+the result as new immutable evidence in the slice folder.
 
 ## 1. Pin and validate the candidate
 
@@ -44,7 +81,7 @@ node --test modules/router/dist/*.test.js
 node --test modules/registry/dist/*.test.js
 
 PYTHONPATH=deploy \
-  "$HOME/.local/share/arcturus-deployer/current/venv/bin/python" \
+  "$(arcturus_paths.py --get deployer_state_dir)/current/venv/bin/python" \
   -W error::ResourceWarning \
   -m unittest discover -s deploy/tests -q
 
@@ -66,7 +103,7 @@ Check only the routing keys needed for the update:
 ```bash
 grep -E \
   '^(VHOSTS_DIR|NGINX_CONTAINER|BASE_DOMAIN|CERT_DOMAIN|CONTAINER_CLI)=' \
-  "$HOME/.config/arcturus/platform.env"
+  "$(arcturus_paths.py --get config_dir)/platform.env"
 ```
 
 Confirm the configured certificate files are readable from inside the ingress container:
@@ -102,7 +139,7 @@ The updater should finish with `Arcturus host update applied and recorded.` Insp
 
 ```bash
 arcturus-host-update show
-readlink -f "$HOME/.local/share/arcturus-deployer/current"
+readlink -f "$(arcturus_paths.py --get deployer_state_dir)/current"
 ```
 
 The updater records successful host installation and update actions. It does not record unrelated shell commands such as `git switch`, `npm ci`, or manual configuration edits.

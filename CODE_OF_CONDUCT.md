@@ -1,3 +1,13 @@
+---
+title: Code of conduct
+kind: policy
+lifecycle: stable
+authority: Community conduct policy
+summary: Expected community conduct and enforcement process.
+maintenance:
+  - The adopted conduct policy changes.
+---
+
 # Code of conduct
 
 Be respectful, specific, and constructive. Harassment, threats, discrimination, doxxing, and deliberate disruption are not accepted in project spaces.

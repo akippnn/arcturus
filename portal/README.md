@@ -1,3 +1,13 @@
+---
+title: Optional ingress compatibility example
+kind: guide
+lifecycle: operational
+authority: Compatibility ingress example
+summary: Operator-owned nginx, certbot, and CrowdSec compatibility setup.
+maintenance:
+  - Compatibility ingress configuration or safety guidance changes.
+---
+
 # Optional ingress compatibility example
 
 This directory is an operator-owned nginx/certbot/CrowdSec example. It is not required by the Arcturus release engine and is not an application lifecycle owner.

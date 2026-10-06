@@ -1,0 +1,16 @@
+{
+  "files": {
+    ".python-version": "sha256:7b55f8e67b5623c4bef3fa691288da9437d79d3aba156de48d481db32ac7d16d",
+    "delivery-docs.schema.json": "sha256:ad0c4d54d20335c8cfedcecb3cf2aac9e574619c95e699092eec4d74053f9060",
+    "package-lock.json": "sha256:23a6769e7f77dc3de8ee3e6b7b79a2d3deaef7d6b2637f427cf3d31183d32009",
+    "package.json": "sha256:f8cacd877e9b43346a33d7427c20c35ba654b3dc6143c7ae9ec28b81a7938993",
+    "pyproject.toml": "sha256:00e125e9b63c314375d527f0bdd4fc021d2c5370a5026a08549639565ba488d9",
+    "test-mermaid.mjs": "sha256:f8f54c48afa7a5f1f40d46048187754118b802c374c5ca8920e3c9b332d55715",
+    "test_vertical_slices.py": "sha256:b4bc3cf596fc859034befe0de9d5fced668c06401fe357beceb5b85bcbead6aa",
+    "uv.lock": "sha256:dfb9787b1190bf6519463775b6ffd2530af987f2e4e0390ae46d319eb7420eef",
+    "validate-mermaid.mjs": "sha256:22de4df0ebb2701a0a5583f5ad5c71d71d8840929f2f93a531b124c7bb7dbfa7",
+    "vertical_slices.py": "sha256:4d44a2fed2934005da5dd8c3bcdd667b038b70c5782e535b8f073e02c0864204"
+  },
+  "schema": "delivery.tooling/v1",
+  "version": 1
+}

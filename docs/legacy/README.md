@@ -1,3 +1,13 @@
+---
+title: Legacy Terraform and Compose compatibility
+kind: legacy
+lifecycle: archived
+authority: Historical compatibility documentation
+summary: Retained guidance for legacy deployment paths.
+maintenance:
+  - No routine maintenance; preserve for historical compatibility.
+---
+
 # Legacy Terraform/Compose compatibility
 
 These files document the original Arcturus deployment architecture. They are retained only to support controlled migration.

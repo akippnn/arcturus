@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delivery.local/schemas/documentation-config-v1.json",
+  "type": "object",
+  "required": ["schema", "tooling", "documents", "slices", "projections"],
+  "properties": {
+    "schema": {"const": "delivery.documentation/v1"},
+    "tooling": {
+      "type": "object",
+      "required": ["install_dir"],
+      "properties": {"install_dir": {"type": "string", "minLength": 1}},
+      "additionalProperties": false
+    },
+    "documents": {
+      "type": "object",
+      "required": ["include", "exclude", "schema"],
+      "properties": {
+        "include": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "exclude": {"type": "array", "items": {"type": "string"}},
+        "schema": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "slices": {
+      "type": "object",
+      "required": ["root", "manifest", "schema"],
+      "properties": {
+        "root": {"type": "string", "minLength": 1},
+        "manifest": {"type": "string", "minLength": 1},
+        "schema": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "projections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "target", "marker"],
+        "properties": {
+          "type": {"enum": ["catalog", "status", "decisions", "slices"]},
+          "target": {"type": "string"},
+          "marker": {"type": "string"},
+          "facts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["label", "source"],
+              "properties": {
+                "label": {"type": "string"},
+                "code": {"type": "boolean"},
+                "source": {
+                  "type": "object",
+                  "required": ["file", "format"],
+                  "properties": {
+                    "file": {"type": "string"},
+                    "format": {"enum": ["text", "json-pointer"]},
+                    "pointer": {"type": "string"}
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "navigation": {
+      "type": "object",
+      "required": ["start", "max_depth", "required", "active_evidence"],
+      "properties": {
+        "start": {"type": "string"},
+        "max_depth": {"type": "integer", "minimum": 1},
+        "required": {"type": "array", "items": {"type": "string"}},
+        "active_evidence": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "prose_guards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["paths", "deny"],
+        "properties": {
+          "paths": {"type": "array", "items": {"type": "string"}},
+          "deny": {"type": "array", "items": {"enum": ["git-sha", "iso-timestamp"]}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "diagrams": {
+      "type": "object",
+      "properties": {"mermaid": {"type": "boolean"}},
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

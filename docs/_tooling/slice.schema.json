@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://arcturus.u128.org/docs/slice.schema.json",
+  "type": "object",
+  "required": ["schema", "id", "title", "state", "verdict", "contract", "gates", "blocker", "next_gate", "links"],
+  "properties": {
+    "schema": {"const": "arcturus.delivery/v1"},
+    "id": {"type": "string", "pattern": "^[A-Z][A-Z0-9]+-[0-9]{3}$"},
+    "title": {"type": "string", "minLength": 1},
+    "state": {"enum": ["proposed", "ready", "active", "blocked", "audit-ready", "closed", "superseded", "deferred"]},
+    "verdict": {"enum": ["pending", "accepted", "rejected"]},
+    "contract": {
+      "type": "object",
+      "required": ["version", "state", "file"],
+      "properties": {
+        "version": {"type": ["string", "null"]},
+        "state": {"enum": ["draft", "approved", "superseded", "not-applicable"]},
+        "file": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "gates": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["applicability", "state", "summary", "evidence"],
+        "properties": {
+          "applicability": {"enum": ["required", "not-applicable"]},
+          "state": {"enum": ["pass", "pending", "fail", "not-applicable"]},
+          "summary": {"type": "string", "minLength": 1},
+          "evidence": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "blocker": {"type": ["string", "null"]},
+    "next_gate": {"type": ["string", "null"]},
+    "links": {
+      "type": "object",
+      "required": ["overview"],
+      "properties": {
+        "overview": {"type": "string"},
+        "contract": {"type": ["string", "null"]},
+        "runbook": {"type": ["string", "null"]},
+        "evidence": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

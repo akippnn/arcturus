@@ -1,0 +1,61 @@
+schema: delivery.documentation/v1
+tooling:
+  install_dir: docs/_tooling
+documents:
+  include:
+    - '*.md'
+    - 'docs/**/*.md'
+    - 'portal/**/*.md'
+    - 'runners/**/*.md'
+  exclude:
+    - '.github/**'
+    - 'docs/_tooling/node_modules/**'
+  schema: docs/_tooling/document.schema.json
+slices:
+  root: docs/slices
+  manifest: manifest.yaml
+  schema: docs/_tooling/slice.schema.json
+projections:
+  - type: catalog
+    target: docs/README.md
+    marker: catalog
+  - type: status
+    target: docs/status.md
+    marker: status
+    facts:
+      - label: Product version
+        code: true
+        source:
+          file: VERSION
+          format: text
+      - label: Manifest APIs
+        code: true
+        source:
+          file: COMPATIBILITY.json
+          format: json-pointer
+          pointer: /manifestApis
+  - type: decisions
+    target: docs/decisions.md
+    marker: decisions
+  - type: slices
+    target: docs/slices/README.md
+    marker: slices
+navigation:
+  start: docs/README.md
+  max_depth: 2
+  required:
+    - docs/architecture.md
+    - docs/status.md
+    - docs/operations.md
+    - docs/ROADMAP.md
+  active_evidence: true
+prose_guards:
+  - paths:
+      - docs/architecture.md
+      - docs/ROADMAP.md
+      - docs/status.md
+    deny:
+      - git-sha
+      - iso-timestamp
+diagrams:
+  mermaid: true

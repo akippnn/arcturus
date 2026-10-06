@@ -177,27 +177,33 @@ jobs:
           if unpinned:
               raise SystemExit('GitHub Actions must be pinned by full SHA:\n' + '\n'.join(unpinned))
           PY
-      - name: Validate local Markdown links
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-          roots = [Path('README.md'), Path('CONTRIBUTING.md'), Path('SECURITY.md'), *Path('docs').rglob('*.md')]
-          broken = []
-          for document in roots:
-              text = document.read_text(encoding='utf-8')
-              for target in re.findall(r'\[[^]]+\]\(([^)]+)\)', text):
-                  if target.startswith(('http://', 'https://', 'mailto:', '#')):
-                      continue
-                  path = target.split('#', 1)[0]
-                  if path and not (document.parent / path).resolve().exists():
-                      broken.append(f'{document}: {target}')
-          if broken:
-              raise SystemExit('Broken Markdown links:\n' + '\n'.join(broken))
-          PY
       - name: Check public-tree hygiene
         run: |
           set -euo pipefail
           test ! -e deploy/.env
           test ! -d docs/internal
           ! find . -type f \( -name '*.log' -o -name '*.tfstate' -o -name '*.sqlite' -o -name '*.pem' -o -name '*.key' \) -print -quit | grep -q .
+
+  documentation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/_tooling/package-lock.json
+      - name: Install documentation tooling
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.12.13
+          uv sync --project docs/_tooling --frozen
+          npm --prefix docs/_tooling ci --no-audit --fund=false
+      - name: Validate documentation
+        run: |
+          uv run --project docs/_tooling --frozen python docs/_tooling/test_vertical_slices.py
+          npm --prefix docs/_tooling test
+          uv run --project docs/_tooling --frozen python docs/_tooling/vertical_slices.py --repo . check

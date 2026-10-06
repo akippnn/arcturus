@@ -1,3 +1,16 @@
+---
+title: Release process
+kind: guide
+lifecycle: operational
+authority: Product release procedure
+summary: Build, validate, and publish Arcturus releases.
+maintenance:
+  - Release gates, artifacts, or publication workflow change.
+nav:
+  section: Operate Arcturus
+  order: 25
+---
+
 # Release process
 
 This process applies to public source releases. Private host inventory and credential-rotation records remain in the private operations repository.
@@ -60,6 +73,8 @@ Require GitHub CI to pass from the candidate commit. Do not treat a locally pass
 - only after those release-local gates pass does it record SHA-256 checksums and open a GitHub prerelease when the version contains a prerelease suffix
 - publish the immutable control-plane OCI bundle separately and record its digest in the release notes
 
-## 7. v1.0 host acceptance
+## 7. Stable v4 host acceptance
 
-Before v1.0, execute the real-host acceptance matrix in the [roadmap](ROADMAP.md), including reboot, unhealthy-release rollback, routing restoration, persistent-data preservation, and control-plane upgrade.
+Before a stable v4 release, execute the real-host acceptance matrix in the
+[roadmap](ROADMAP.md), including reboot, unhealthy-release rollback, routing
+restoration, persistent-data preservation, and control-plane upgrade.

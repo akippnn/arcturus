@@ -10,6 +10,7 @@ dist/
 rust/target/
 __pycache__/
 *.pyc
+docs/_tooling/.venv/
 
 # Certificates and provider credentials
 portal/data/certbot/cloudflare.ini

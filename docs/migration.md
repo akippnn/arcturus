@@ -1,6 +1,25 @@
+---
+title: Compose and Terraform migration
+kind: guide
+lifecycle: operational
+authority: Supported application deployment migration procedure
+summary: Move legacy Compose or Terraform deployments into ServiceRelease lifecycle.
+maintenance:
+  - Migration, rollback, or compatibility behavior changes.
+nav:
+  section: Operate Arcturus
+  order: 26
+---
+
 # Migrating from Compose or Terraform application deployment
 
 The migration goal is one production lifecycle owner: Arcturus-generated Quadlets and user systemd. Compose may remain for local development; Terraform may remain for long-lived infrastructure, but neither should recreate application containers after cutover.
+
+This application-lifecycle migration is separate from changing Arcturus host
+filesystem roots. For an existing host moving to custom XDG or FHS paths,
+complete the stopped, non-destructive procedure in
+[Filesystem layout](filesystem-layout.md) first. The installer never treats a
+new empty path as permission to abandon an existing lifecycle database.
 
 ## 1. Inventory and checkpoint
 
@@ -53,6 +72,38 @@ After success, remove obsolete application resources from Terraform state withou
 Deploy an intentionally unhealthy same-image release and require automatic rollback to restore the known-good revision, digests, and route. Reboot the host and verify declared critical targets and timers individually.
 
 For database credential rotation, keep the old runtime role usable until two successful releases and rollback testing have completed on the new role.
+
+## 7. Adopt into fleet control separately
+
+Completing the Compose-to-Quadlet migration does not automatically adopt a
+service into distributed fleet management. Existing host-local services and
+their deployment history remain valid until an operator submits a
+`WorkloadIntent` for that service.
+
+Before adoption:
+
+- preserve the complete `ServiceRelease v2` as the worker-local lifecycle and
+  rollback boundary;
+- identify the intended initial worker and confirm its architecture, memory,
+  capability, topology, secret, network, and external-volume prerequisites;
+- import external infrastructure into the fleet resource catalog without
+  transferring lifecycle ownership or credential values;
+- bind logical resource names to Podman secret references already declared by
+  the release; and
+- declare movement policy conservatively from the service's actual state and
+  concurrency behavior.
+
+Do not declare a service overlap-safe merely because its image is portable.
+Writable local volumes, authoritative node-local state, legacy migration,
+single-writer behavior, or a need for fencing can make target-first overlap
+unsafe. DIST-001 refuses those moves and does not transfer volumes or execute a
+fencing strategy.
+
+For an overlap-safe service whose authoritative state is external, apply the
+intent, inspect `fleet service explain`, and verify the initial observation
+before considering explicit movement. Existing local lifecycle commands remain
+the recovery authority on each worker, while fleet status combines desired and
+observed placement.
 
 ## Recommended order
 

@@ -3,7 +3,7 @@ title: Raspberry Pi SD-card provisioning
 kind: guide
 lifecycle: operational
 authority: Raspberry Pi provisioning procedure
-summary: Prepare an AlmaLinux Raspberry Pi Arcturus host safely.
+summary: Prepare an AlmaLinux Raspberry Pi worker safely.
 maintenance:
   - Provisioning inputs, safety checks, or first-boot behavior change.
 nav:
@@ -14,14 +14,14 @@ nav:
 # Raspberry Pi SD-card provisioning
 
 `deploy/provision-rpi-sd` prepares an official AlmaLinux Raspberry Pi image and
-stages an Arcturus host for automatic installation on first boot. The current
+stages an Arcturus worker for automatic installation on first boot. The current
 destructive writer supports macOS, where Disk Arbitration provides enough
 metadata to reject internal, virtual, read-only, partition-only, and undersized
 targets.
 
 The workflow does not hardcode a disk, workstation interface, subnet, gateway,
 DNS server, static address, AlmaLinux release, SSH key, hostname, Arcturus
-bundle, or service account. Values are
+bundle, worker identity, control-plane URL, or service account. Values are
 discovered, selected interactively, or supplied explicitly for reproducible
 automation.
 
@@ -44,9 +44,9 @@ automation.
    and writes `user-data`, `meta-data`, and `network-config`.
 8. Pre-authorizes the selected OpenSSH public key for AlmaLinux's default user,
    disables SSH password authentication, and stages the Arcturus first-boot
-   installer and optional target registry credentials.
+   installer and protected worker/service credentials.
 9. Optionally installs Tailscale from the matching RHEL-compatible package
-   repository and enrolls the host using a protected auth-key file on first
+   repository and enrolls the worker using a protected auth-key file on first
    boot.
 10. Ejects the completed card.
 
@@ -55,6 +55,20 @@ installation, and a separate static `network-config` for its Raspberry Pi
 images in its [official Raspberry Pi guide](https://wiki.almalinux.org/documentation/raspberry-pi).
 
 ## Before running
+
+Enroll the worker and create any lifecycle tokens it needs:
+
+```bash
+config_dir="$(arcturus_paths.py --get config_dir)"
+arcturusctl fleet worker enroll '<worker-id>' \
+  --credential-output './<worker-id>.worker-token'
+
+arcturusctl token create \
+  --database "$config_dir/tokens.json" \
+  --service '<service>' \
+  --token-id '<service>-agent' \
+  --output './<service>.lifecycle-token'
+```
 
 Obtain a digest-pinned, multi-architecture Arcturus bundle containing an arm64
 variant. The provisioner deliberately rejects floating bundle tags. If the
@@ -73,7 +87,7 @@ raw-device write.
 If Tailscale enrollment is wanted, create a reusable, one-off, or ephemeral
 auth key in the Tailscale admin console and store it in a local file readable
 only by you. Prefer a short-lived, tagged key whose permissions are limited to
-Arcturus hosts. Pass the filename, never the secret value, to the
+Arcturus workers. Pass the filename, never the secret value, to the
 provisioner. Tailscale SSH is not enabled unless `--tailscale-ssh` is also
 given. The first-boot script detects the installed RHEL-compatible major and
 follows Tailscale's documented
@@ -92,7 +106,10 @@ deploy/provision-rpi-sd \
   --image-file "$HOME/Downloads/AlmaLinux-10-RaspberryPi-gpt-10.1-20260520.aarch64.raw" \
   --image-sha256 '0a0333a504fc13c6a1922b0b56a4bf3e22c5184afbec25bf7fc1d2bc42cc14ee' \
   --tailscale-auth-key-file './tailscale-auth.key' \
-  --arcturus-bundle 'ghcr.io/<owner>/<bundle>@sha256:<digest>'
+  --arcturus-bundle 'ghcr.io/<owner>/<bundle>@sha256:<digest>' \
+  --worker-id '<worker-id>' \
+  --control-plane-url '<reachable-control-plane-url>' \
+  --worker-token-file './<worker-id>.worker-token'
 ```
 
 The interactive flow selects a safe removable disk, discovers the active LAN,
@@ -110,7 +127,10 @@ resolved plan, and does not unmount, download the image, or write the card:
 ```bash
 deploy/provision-rpi-sd \
   --arcturus-bundle 'registry.example.org/platform/arcturus@sha256:<digest>' \
-  --tailscale-auth-key-file './tailscale-auth.key'
+  --worker-id '<worker-id>' \
+  --control-plane-url 'https://fleet.example.internal:9190' \
+  --worker-token-file './<worker-id>.worker-token' \
+  --service-token '<service>=./<service>.lifecycle-token'
 ```
 
 The interactive selectors then ask for:
@@ -148,7 +168,10 @@ deploy/provision-rpi-sd \
   --alma-major '<supported-major>' \
   --partition-scheme gpt \
   --arcturus-bundle 'registry.example.org/platform/arcturus@sha256:<digest>' \
-  --host-user '<service-account>'
+  --host-user '<service-account>' \
+  --worker-id '<worker-id>' \
+  --control-plane-url 'https://fleet.example.internal:9190' \
+  --worker-token-file './<worker-id>.worker-token'
 ```
 
 An explicit `--image-file` with mandatory `--image-sha256` uses an existing
@@ -157,7 +180,14 @@ An explicit `--image-file` with mandatory `--image-sha256` uses an existing
 `--alma-repository`, `--compatibility-file`, `--host-interface`, and
 `--cache-dir` provide reproducible overrides without modifying the script.
 
-If the target host itself needs pull credentials for private workload images,
+The worker installation also accepts `--config-root`, `--data-root`,
+`--cache-root`, `--runtime-root`, `--bin-dir`, and `--workload-root`. These are
+passed unchanged to the first-boot host installer. Every selected location must
+be absolute and writable by the chosen rootless service account; specifying
+system-owned FHS roots does not turn the current user-systemd installer into an
+RPM or privileged system service.
+
+If the target worker itself needs pull credentials for private workload images,
 provide a separate pull-only file with `--target-registry-auth-file`. This is an
 explicit target secret: it is staged on the card and installed into the chosen
 service account's Podman configuration. It is not reused for the workstation's
@@ -197,8 +227,11 @@ label, and then runs `arcturus-firstboot.sh`. That script:
   systemd compatibility requirements;
 - creates the selected rootless Arcturus service account;
 - enables user lingering and its systemd user manager;
+- installs protected worker and service-scoped lifecycle credentials;
 - installs the staged arm64 Arcturus payload, or pulls the digest-pinned bundle
   when `first-boot-pull` was explicitly selected;
+- installs the same canonical path resolver beside the bootstrap installer;
+- enables the outbound worker agent; and
 - installs and enrolls Tailscale when `--tailscale-auth-key-file` was supplied;
   Tailscale SSH remains an explicit opt-in; and
 - records `/var/lib/arcturus-firstboot/complete` before deleting credential
@@ -212,21 +245,22 @@ post-boot key-copy exchange is required. Connect using the selected static IP:
 ssh almalinux@'<static-address>'
 ```
 
-Inspect `/var/log/arcturus-firstboot.log`, `cloud-init status --long`, and the
-user-systemd Arcturus services if installation does not complete. With
-`first-boot-pull`, the bundle must be reachable from the Pi; with
+Inspect `/var/log/arcturus-firstboot.log`, `cloud-init status --long`, and
+`systemctl --user status arcturus-agent.service` if installation does not
+complete. With `first-boot-pull`, the bundle must be reachable from the Pi; with
 the default staged delivery, it only needs to be reachable from the provisioning
 workstation. The bundle must contain a compatible arm64 image. A plan-only run
 or successful SD write does not prove the first-boot installation; that requires
-booting the target and validating the installed host services.
+booting the target and observing it in
+`arcturusctl fleet worker list`.
 
 ## Credential handling
 
 The card necessarily carries bootstrap credentials before its first boot.
 Treat it as sensitive removable media. The first-boot script deletes the live
 credential files after a successful install, but flash storage does not provide
-reliable secure erasure guarantees. Rotate any staged target-registry credential
-if the card is lost, duplicated, or handled outside the trusted provisioning path.
+reliable secure erasure guarantees. Rotate the worker or service credentials if
+the card is lost, duplicated, or handled outside the trusted provisioning path.
 The same warning applies to the Tailscale auth key. The bootstrap copies it to a
 root-only temporary file, removes that copy on exit, and removes the CIDATA copy
 after successful enrollment. Use a short-lived or one-off auth key so a copied

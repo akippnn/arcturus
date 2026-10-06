@@ -1,6 +1,26 @@
+---
+title: ServiceRelease manifest reference
+kind: reference
+lifecycle: stable
+authority: Worker-local ServiceRelease contract
+summary: Fields and behavior of the authoritative application release manifest.
+maintenance:
+  - The ServiceRelease schema or lifecycle interpretation changes.
+nav:
+  section: Reference
+  order: 30
+---
+
 # ServiceRelease manifest reference
 
 The current release API is `arcturus.u128.org/v2` with kind `ServiceRelease`. Unknown fields are rejected.
+
+`ServiceRelease v2` remains the atomic worker-local deployment, activation,
+rollback, and co-location contract. Fleet identity, placement, worker
+assignment, resource ownership, and movement policy are additive contracts and
+are deliberately not fields in this manifest. A fleet `WorkloadIntent` embeds
+one complete release and binds external resources around it; the authoritative
+release validation described here is unchanged.
 
 ## Minimal example
 
@@ -191,4 +211,7 @@ The deployer discovers containers by Compose project label, records their prior 
 
 ## Current limitations
 
-The v0.99 schema does not yet expose CPU, memory, or PID limits, environment overlays, backup policy, deployment hooks, or blue-green strategies. These are tracked in the [roadmap](ROADMAP.md), and should not be emulated through unreviewed generated-unit edits.
+`ServiceRelease v2` does not expose CPU, memory, or PID limits, environment
+overlays, backup policy, deployment hooks, or blue-green strategies. These
+remain candidate future slices in the [roadmap](ROADMAP.md) and should not be
+emulated through unreviewed generated-unit edits.

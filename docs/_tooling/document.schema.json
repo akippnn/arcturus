@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://arcturus.u128.org/docs/document.schema.json",
+  "type": "object",
+  "required": ["title", "kind", "lifecycle", "authority", "summary", "maintenance"],
+  "properties": {
+    "title": {"type": "string", "minLength": 1},
+    "kind": {
+      "enum": [
+        "landing", "architecture", "status", "roadmap", "decision-index",
+        "slice-index", "slice-overview", "contract", "evidence", "runbook",
+        "adr", "guide", "reference", "policy", "archive", "legacy"
+      ]
+    },
+    "lifecycle": {"enum": ["stable", "operational", "generated", "immutable", "archived"]},
+    "authority": {"type": "string", "minLength": 1},
+    "summary": {"type": "string", "minLength": 1},
+    "maintenance": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "id": {"type": "string", "minLength": 1},
+    "slice": {"type": "string", "minLength": 1},
+    "version": {"type": ["string", "number"]},
+    "contract_state": {"enum": ["draft", "approved", "superseded"]},
+    "approval": {"type": "object"},
+    "captured_at": {"type": "string"},
+    "source": {"type": "object"},
+    "gates": {"type": "object"},
+    "status": {"type": "string"},
+    "generated_by": {"type": "string"},
+    "generated_sections": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "nav": {
+      "type": "object",
+      "required": ["section", "order"],
+      "properties": {
+        "section": {"type": "string"},
+        "order": {"type": "integer"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

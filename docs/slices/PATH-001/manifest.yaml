@@ -1,0 +1,38 @@
+schema: arcturus.delivery/v1
+id: PATH-001
+title: Four-root filesystem transition
+state: active
+verdict: pending
+contract:
+  version: null
+  state: not-applicable
+  file: null
+gates:
+  PATH-001-ROOTS:
+    applicability: required
+    state: pass
+    summary: Python, Rust, Node, installers, and units share the four-root contract.
+    evidence: evidence/source-implementation.md
+  PATH-001-COMPAT:
+    applicability: required
+    state: pass
+    summary: Compatibility overrides and unsafe state abandonment are covered locally.
+    evidence: evidence/source-implementation.md
+  PATH-001-PHYSICAL:
+    applicability: required
+    state: pending
+    summary: Validate clean and upgraded AlmaLinux rootless installations and migration.
+    evidence: null
+  PATH-001-RPM:
+    applicability: required
+    state: pending
+    summary: Prove RPM ownership, system services, SELinux, upgrade, and uninstall behavior.
+    evidence: null
+blocker: Clean AlmaLinux hosts and the future RPM packaging implementation are required.
+next_gate: PATH-001-PHYSICAL
+links:
+  overview: README.md
+  contract: null
+  runbook: null
+  evidence:
+    - evidence/source-implementation.md

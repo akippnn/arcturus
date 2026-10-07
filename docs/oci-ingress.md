@@ -1,8 +1,26 @@
+---
+title: OCI ingress
+kind: reference
+lifecycle: stable
+authority: Arcturus-owned OCI ingress architecture
+summary: Registry ingress, authorization, and ownership boundaries.
+maintenance:
+  - OCI ingress topology or supported compatibility path changes.
+nav:
+  section: Reference
+  order: 33
+---
+
 # Arcturus OCI ingress
 
 Arcturus can receive application images from Gitea Actions, GitHub Actions, or a generic Tailscale-connected runner without placing an external application registry in the deployment chain.
 
-Use a currently supported CNCF Distribution v3 image pinned by digest. At the `v1.0.0-rc.2` source freeze, v3.1.1 is the current stable release and includes the upstream fix for CVE-2026-41888. Do not treat the minimum token-auth feature version as a security-support floor: select a currently supported release and review upstream advisories before installation. The installer validates digest pinning, but the operator remains responsible for the pinned release.
+Use a supported CNCF Distribution v3 image pinned by digest. Repository
+examples retain v3.1.1 as a compatibility reference, not as a declaration of
+the newest supported upstream release. Do not treat the minimum token-auth
+feature version as a security-support floor: review upstream advisories before
+selecting a digest. The installer validates digest pinning, but the operator
+remains responsible for the selected release.
 
 The production boundary deliberately separates responsibilities:
 
@@ -55,13 +73,13 @@ A failure during or after the transition—including later router, deployer, or 
 ## Installed state
 
 ```text
-~/.config/arcturus/oci-registry.env
-~/.config/arcturus/oci-registry-runtime.env
-~/.config/arcturus/oci-signing.seed
-~/.config/containers/systemd/arcturus/arcturus-oci-registry.container
-~/.local/share/arcturus-registry/
-~/.local/share/arcturus-oci-auth/grants.sqlite3
-~/.local/share/arcturus-oci-auth/jwks.json
+<config-root>/arcturus/oci-registry.env
+<config-root>/arcturus/oci-registry-runtime.env
+<config-root>/arcturus/oci-signing.seed
+<config-root>/containers/systemd/arcturus/arcturus-oci-registry.container
+<data-root>/arcturus-registry/
+<data-root>/arcturus-oci-auth/grants.sqlite3
+<data-root>/arcturus-oci-auth/jwks.json
 ```
 
 The signing seed, runtime environment, and databases are protected host state. The JWKS contains only the public key and is mounted read-only into Distribution.
@@ -128,13 +146,15 @@ curl --silent --output /dev/null --write-out '%{http_code}\n' \
   https://registry.example-tailnet.ts.net/v2/  # expect 401
 ```
 
-## Deliberately unfinished release gates
+## Acceptance boundary
 
-The `v1.0.0-rc.2` source candidate implements authenticated ingress, verification, receipts, and deployment enforcement. It does not yet claim operational stable-release acceptance. The remaining gates are:
+Authenticated ingress, verification, receipts, and deployment enforcement are
+source capabilities. Stable operational acceptance additionally requires:
 
 - migrate the Service Blueprint and CrownFi workflow to the publisher helper;
 - run real GitHub Actions upload, interruption/retry, expiry, cross-service, oversize, digest-mismatch, restart/re-pull, and registry-unavailable rollback tests;
 - validate clean-host installation and a live-host upgrade;
 - implement release-aware retention pins and reviewed garbage collection before enabling deletion.
 
-Until retention exists, monitor storage and keep deletion/garbage collection disabled.
+Until retention exists, monitor storage and keep deletion/garbage collection
+disabled. Current completion state belongs in [Status](status.md).

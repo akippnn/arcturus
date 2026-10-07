@@ -1,3 +1,4 @@
+mod fleet;
 mod registry;
 
 use std::env;
@@ -8,19 +9,47 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arcturus_auth::{AuthError, ControlTokenVerifier, GrantStore, JwkSet, RegistryTokenIssuer};
 use arcturus_contracts::{
     ApiErrorBody, ApiErrorResponse, ArtifactUploadCompletionRequest, ArtifactUploadRequest,
-    HealthResponse,
+    HealthResponse, ObservedState, ResourceRecord, ServiceName, WorkerHeartbeat, WorkerId,
+    WorkerRegistrationRequest, WorkloadIntent,
 };
-use axum::extract::{Path as AxumPath, RawQuery, State};
+use arcturus_paths::ArcturusPaths;
+use axum::extract::{Path as AxumPath, Query, RawQuery, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, PRAGMA, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, routing::get, routing::post};
+use axum::{
+    Json, Router,
+    routing::{get, post, put},
+};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
+pub use fleet::{FleetError, FleetStore, MoveRequest, WorkerView, WorkloadView};
 pub use registry::{RegistryPolicy, RegistryVerificationError, RegistryVerifier};
+
+#[derive(Clone)]
+pub struct FleetRuntime {
+    pub store: FleetStore,
+    pub operator_tokens: ControlTokenVerifier,
+}
+
+impl FleetRuntime {
+    pub fn from_environment() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let paths = ArcturusPaths::from_environment().map_err(AuthError::Serialization)?;
+        let state_db = env::var("ARCTURUSD_FLEET_STATE_DB")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| paths.fleet_database());
+        let token_file = env::var("ARCTURUSD_FLEET_TOKENS_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| paths.fleet_operator_tokens());
+        Ok(Self {
+            store: FleetStore::open(state_db)?,
+            operator_tokens: ControlTokenVerifier::new(token_file),
+        })
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -72,16 +101,19 @@ impl AppState {
     }
 
     pub fn from_environment() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let home = env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+        let paths = ArcturusPaths::from_environment().map_err(AuthError::Serialization)?;
         let state_db = env::var("ARCTURUSD_STATE_DB")
-            .unwrap_or_else(|_| format!("{home}/.local/share/arcturus-oci-auth/grants.sqlite3"));
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| paths.oci_grant_database());
         let token_file = env::var("RUNNER_TOKENS_FILE")
-            .unwrap_or_else(|_| format!("{home}/.config/arcturus/tokens.json"));
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| paths.lifecycle_tokens());
         let signing_key = env::var("ARCTURUS_OCI_SIGNING_KEY").map_err(|_| {
             AuthError::InvalidSigningKey("ARCTURUS_OCI_SIGNING_KEY is required".into())
         })?;
         let jwks_file = env::var("ARCTURUS_OCI_JWKS_FILE")
-            .unwrap_or_else(|_| format!("{home}/.local/share/arcturus-oci-auth/jwks.json"));
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| paths.oci_jwks());
         let issuer =
             env::var("ARCTURUS_OCI_TOKEN_ISSUER").unwrap_or_else(|_| "arcturusd".to_owned());
         let audience =
@@ -131,7 +163,7 @@ impl AppState {
                 max_artifact_bytes,
                 max_concurrent_verifications,
             },
-            ControlTokenVerifier::new(PathBuf::from(token_file)),
+            ControlTokenVerifier::new(token_file),
             GrantStore::open(state_db)?,
             token_issuer,
         )
@@ -180,6 +212,8 @@ pub fn health_response() -> HealthResponse {
             "artifact-verification-and-receipts".to_owned(),
             "bounded-artifact-verification".to_owned(),
             "manifest-v2-python-lifecycle".to_owned(),
+            "dist-001-multi-workload-fleet-foundation".to_owned(),
+            "xdg-fhs-four-root-layout".to_owned(),
         ],
     }
 }
@@ -330,6 +364,236 @@ pub fn app(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
 }
 
+pub fn fleet_app(runtime: FleetRuntime) -> Router {
+    Router::new()
+        .route("/v1/fleet/workers", post(enroll_worker).get(list_workers))
+        .route("/v1/fleet/resources/{resource_id}", put(import_resource))
+        .route("/v1/fleet/workloads", get(list_workloads))
+        .route(
+            "/v1/fleet/workloads/{workload}",
+            put(apply_workload).get(get_workload),
+        )
+        .route("/v1/fleet/workloads/{workload}/explain", get(get_workload))
+        .route("/v1/fleet/workloads/{workload}/moves", post(move_workload))
+        .route(
+            "/v1/fleet/workers/{worker_id}/heartbeat",
+            put(worker_heartbeat),
+        )
+        .route(
+            "/v1/fleet/workers/{worker_id}/assignments",
+            get(worker_assignments),
+        )
+        .route(
+            "/v1/fleet/workers/{worker_id}/workloads/{workload}/observed-state",
+            put(worker_observed_state),
+        )
+        .with_state(Arc::new(runtime))
+        .layer(TraceLayer::new_for_http())
+}
+
+async fn authorize_operator(runtime: &FleetRuntime, headers: &HeaderMap) -> Result<(), ApiFailure> {
+    let authorization = header_text(headers, AUTHORIZATION)?.to_owned();
+    let verifier = runtime.operator_tokens.clone();
+    tokio::task::spawn_blocking(move || {
+        verifier.authorize_audience(&authorization, "fleet-operator")
+    })
+    .await
+    .map_err(|_| ApiFailure::internal("fleet token verification task failed"))?
+    .map_err(ApiFailure::control_auth)
+}
+
+async fn authorize_worker(
+    runtime: &FleetRuntime,
+    headers: &HeaderMap,
+    worker_id: WorkerId,
+) -> Result<(), ApiFailure> {
+    let authorization = header_text(headers, AUTHORIZATION)?.to_owned();
+    let store = runtime.store.clone();
+    tokio::task::spawn_blocking(move || store.authorize_worker(&worker_id, &authorization))
+        .await
+        .map_err(|_| ApiFailure::internal("worker token verification task failed"))?
+        .map_err(ApiFailure::fleet)
+}
+
+async fn enroll_worker(
+    State(runtime): State<Arc<FleetRuntime>>,
+    headers: HeaderMap,
+    Json(request): Json<WorkerRegistrationRequest>,
+) -> Result<Response, ApiFailure> {
+    authorize_operator(&runtime, &headers).await?;
+    let store = runtime.store.clone();
+    let response = tokio::task::spawn_blocking(move || store.enroll(request, unix_timestamp()))
+        .await
+        .map_err(|_| ApiFailure::internal("worker enrollment task failed"))??;
+    Ok(no_store_json(StatusCode::CREATED, response))
+}
+
+async fn list_workers(
+    State(runtime): State<Arc<FleetRuntime>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiFailure> {
+    authorize_operator(&runtime, &headers).await?;
+    let store = runtime.store.clone();
+    let response = tokio::task::spawn_blocking(move || store.list_workers())
+        .await
+        .map_err(|_| ApiFailure::internal("worker listing task failed"))??;
+    Ok(no_store_json(StatusCode::OK, response))
+}
+
+async fn import_resource(
+    State(runtime): State<Arc<FleetRuntime>>,
+    AxumPath(resource_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(resource): Json<ResourceRecord>,
+) -> Result<Response, ApiFailure> {
+    authorize_operator(&runtime, &headers).await?;
+    if resource.resource_id.as_str() != resource_id {
+        return Err(ApiFailure::bad_request(
+            "resource path and payload identities differ",
+        ));
+    }
+    let store = runtime.store.clone();
+    let response = tokio::task::spawn_blocking(move || store.import_resource(&resource))
+        .await
+        .map_err(|_| ApiFailure::internal("resource import task failed"))??;
+    Ok(no_store_json(StatusCode::OK, response))
+}
+
+async fn apply_workload(
+    State(runtime): State<Arc<FleetRuntime>>,
+    AxumPath(workload): AxumPath<String>,
+    headers: HeaderMap,
+    Json(intent): Json<WorkloadIntent>,
+) -> Result<Response, ApiFailure> {
+    authorize_operator(&runtime, &headers).await?;
+    if intent.workload_name.as_str() != workload {
+        return Err(ApiFailure::bad_request(
+            "workload path and payload identities differ",
+        ));
+    }
+    let store = runtime.store.clone();
+    let response =
+        tokio::task::spawn_blocking(move || store.apply_intent(&intent, unix_timestamp()))
+            .await
+            .map_err(|_| ApiFailure::internal("workload apply task failed"))??;
+    Ok(no_store_json(StatusCode::OK, response))
+}
+
+async fn list_workloads(
+    State(runtime): State<Arc<FleetRuntime>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiFailure> {
+    authorize_operator(&runtime, &headers).await?;
+    let store = runtime.store.clone();
+    let response = tokio::task::spawn_blocking(move || store.list_workloads())
+        .await
+        .map_err(|_| ApiFailure::internal("workload listing task failed"))??;
+    Ok(no_store_json(StatusCode::OK, response))
+}
+
+async fn get_workload(
+    State(runtime): State<Arc<FleetRuntime>>,
+    AxumPath(workload): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiFailure> {
+    authorize_operator(&runtime, &headers).await?;
+    let workload = ServiceName::try_from(workload)
+        .map_err(|error| ApiFailure::bad_request(error.to_string()))?;
+    let store = runtime.store.clone();
+    let response = tokio::task::spawn_blocking(move || store.workload(workload))
+        .await
+        .map_err(|_| ApiFailure::internal("workload lookup task failed"))??;
+    Ok(no_store_json(StatusCode::OK, response))
+}
+
+async fn move_workload(
+    State(runtime): State<Arc<FleetRuntime>>,
+    AxumPath(workload): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<MoveRequest>,
+) -> Result<Response, ApiFailure> {
+    authorize_operator(&runtime, &headers).await?;
+    let workload = ServiceName::try_from(workload)
+        .map_err(|error| ApiFailure::bad_request(error.to_string()))?;
+    let store = runtime.store.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        store.move_workload(&workload, request, unix_timestamp())
+    })
+    .await
+    .map_err(|_| ApiFailure::internal("workload movement task failed"))??;
+    Ok(no_store_json(StatusCode::ACCEPTED, response))
+}
+
+async fn worker_heartbeat(
+    State(runtime): State<Arc<FleetRuntime>>,
+    AxumPath(worker_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(heartbeat): Json<WorkerHeartbeat>,
+) -> Result<Response, ApiFailure> {
+    let worker_id = WorkerId::try_from(worker_id)
+        .map_err(|error| ApiFailure::bad_request(error.to_string()))?;
+    if heartbeat.worker_id != worker_id {
+        return Err(ApiFailure::bad_request(
+            "worker path and payload identities differ",
+        ));
+    }
+    authorize_worker(&runtime, &headers, worker_id).await?;
+    let store = runtime.store.clone();
+    tokio::task::spawn_blocking(move || store.heartbeat(&heartbeat, unix_timestamp()))
+        .await
+        .map_err(|_| ApiFailure::internal("heartbeat task failed"))??;
+    Ok(no_store_json(
+        StatusCode::OK,
+        serde_json::json!({"status": "accepted"}),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssignmentQuery {
+    #[serde(default)]
+    after_revision: u64,
+}
+
+async fn worker_assignments(
+    State(runtime): State<Arc<FleetRuntime>>,
+    AxumPath(worker_id): AxumPath<String>,
+    Query(query): Query<AssignmentQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiFailure> {
+    let worker_id = WorkerId::try_from(worker_id)
+        .map_err(|error| ApiFailure::bad_request(error.to_string()))?;
+    authorize_worker(&runtime, &headers, worker_id.clone()).await?;
+    let store = runtime.store.clone();
+    let response =
+        tokio::task::spawn_blocking(move || store.assignment_set(&worker_id, query.after_revision))
+            .await
+            .map_err(|_| ApiFailure::internal("assignment poll task failed"))??;
+    Ok(no_store_json(StatusCode::OK, response))
+}
+
+async fn worker_observed_state(
+    State(runtime): State<Arc<FleetRuntime>>,
+    AxumPath((worker_id, workload)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    Json(observation): Json<ObservedState>,
+) -> Result<Response, ApiFailure> {
+    let worker_id = WorkerId::try_from(worker_id)
+        .map_err(|error| ApiFailure::bad_request(error.to_string()))?;
+    if observation.worker_id != worker_id || observation.workload_name.as_str() != workload {
+        return Err(ApiFailure::bad_request(
+            "observation path and payload identities differ",
+        ));
+    }
+    authorize_worker(&runtime, &headers, worker_id).await?;
+    let store = runtime.store.clone();
+    let response =
+        tokio::task::spawn_blocking(move || store.observe(&observation, unix_timestamp()))
+            .await
+            .map_err(|_| ApiFailure::internal("observation task failed"))??;
+    Ok(no_store_json(StatusCode::OK, response))
+}
+
 fn unix_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -433,6 +697,22 @@ impl ApiFailure {
         failure
     }
 
+    fn fleet(error: FleetError) -> Self {
+        match error {
+            FleetError::NotFound(message) => Self {
+                status: StatusCode::NOT_FOUND,
+                code: "not_found",
+                message,
+                challenge: None,
+            },
+            FleetError::Conflict(message) => Self::conflict(message),
+            FleetError::Invalid(message) => Self::bad_request(message),
+            FleetError::Unauthorized => Self::unauthorized("worker credential is invalid"),
+            FleetError::Database(message) => Self::internal(message),
+            FleetError::LockPoisoned => Self::internal("fleet state lock is poisoned"),
+        }
+    }
+
     fn registry_unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -508,6 +788,12 @@ impl ApiFailure {
             message: message.into(),
             challenge: None,
         }
+    }
+}
+
+impl From<FleetError> for ApiFailure {
+    fn from(error: FleetError) -> Self {
+        Self::fleet(error)
     }
 }
 
@@ -632,6 +918,36 @@ mod tests {
         .unwrap()
     }
 
+    fn test_fleet_runtime(temp: &TempDir) -> FleetRuntime {
+        let token = "fleet-operator-test-token";
+        let salt = b"fleet-operator12";
+        let params = ScryptParams::new(14, 8, 1, 32).unwrap();
+        let mut hash = [0_u8; 32];
+        scrypt(token.as_bytes(), salt, &params, &mut hash).unwrap();
+        let token_path = temp.path().join("fleet-tokens.json");
+        fs::write(
+            &token_path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "tokens": [{
+                    "id": "fleet",
+                    "algorithm": "scrypt",
+                    "salt": URL_SAFE.encode(salt),
+                    "hash": URL_SAFE.encode(hash),
+                    "services": [],
+                    "audiences": ["fleet-operator"]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).unwrap();
+        FleetRuntime {
+            store: FleetStore::open(temp.path().join("fleet.sqlite3")).unwrap(),
+            operator_tokens: ControlTokenVerifier::new(token_path),
+        }
+    }
+
     #[test]
     fn health_contract_advertises_receipt_boundary() {
         let response = health_response();
@@ -656,6 +972,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn fleet_operator_enrolls_and_worker_credential_is_identity_scoped() {
+        let temp = TempDir::new().unwrap();
+        let router = fleet_app(test_fleet_runtime(&temp));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/fleet/workers")
+            .header(AUTHORIZATION, "Bearer fleet-operator-test-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workerId":"worker-a","capabilities":[],"topology":{}}"#,
+            ))
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let enrollment: arcturus_contracts::WorkerEnrollmentResponse =
+            serde_json::from_slice(&body).unwrap();
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/fleet/workers")
+            .header(AUTHORIZATION, "Bearer fleet-operator-test-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workerId":"worker-b","capabilities":[],"topology":{}}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            router.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+
+        let heartbeat = serde_json::json!({
+            "workerId": "worker-a", "agentInstanceId": "instance",
+            "inventory": {"inventoryGeneration": 1, "architecture": "amd64", "operatingSystem": "linux", "logicalCpuCount": 4, "totalMemoryBytes": 1000, "storagePools": []},
+            "pressure": {"pressureSequence": 1, "observedAt": 1, "availableMemoryBytes": 500, "storageFreeBytes": {}},
+            "acceptedAssignmentSetRevision": 0, "acceptedAssignments": {}
+        });
+        let request = Request::builder()
+            .method("PUT")
+            .uri("/v1/fleet/workers/worker-a/heartbeat")
+            .header(AUTHORIZATION, format!("Bearer {}", enrollment.credential))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&heartbeat).unwrap()))
+            .unwrap();
+        assert_eq!(
+            router.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let heartbeat_b = serde_json::json!({
+            "workerId": "worker-b", "agentInstanceId": "instance",
+            "inventory": {"inventoryGeneration": 1, "architecture": "arm64", "operatingSystem": "linux", "logicalCpuCount": 4, "totalMemoryBytes": 1000, "storagePools": []},
+            "pressure": {"pressureSequence": 1, "observedAt": 1, "availableMemoryBytes": 500, "storageFreeBytes": {}},
+            "acceptedAssignmentSetRevision": 0, "acceptedAssignments": {}
+        });
+        let request = Request::builder()
+            .method("PUT")
+            .uri("/v1/fleet/workers/worker-b/heartbeat")
+            .header(AUTHORIZATION, format!("Bearer {}", enrollment.credential))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&heartbeat_b).unwrap()))
+            .unwrap();
+        assert_eq!(
+            router.oneshot(request).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]

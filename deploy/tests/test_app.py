@@ -19,6 +19,31 @@ from release import DeploymentFailure, DeploymentRequest
 
 
 class ValidationTests(unittest.TestCase):
+    def test_fleet_operator_token_is_not_a_lifecycle_or_general_token(self):
+        token = "fleet-operator-token"
+        salt = b"0123456789abcdef"
+        digest = hashlib.scrypt(token.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
+        payload = {"version": 2, "tokens": [{
+            "id": "fleet", "algorithm": "scrypt",
+            "salt": base64.urlsafe_b64encode(salt).decode(),
+            "hash": base64.urlsafe_b64encode(digest).decode(),
+            "services": [], "audiences": ["fleet-operator"],
+        }]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_file = Path(temp_dir) / "tokens.json"
+            token_file.write_text(json.dumps(payload))
+            with (
+                patch.object(deploy_app, "TOKEN_FILE", token_file),
+                patch.object(deploy_app, "LEGACY_TOKEN_FILE", Path(temp_dir) / "legacy.json"),
+                patch.object(deploy_app, "WEBHOOK_SECRET", ""),
+            ):
+                with self.assertRaises(deploy_app.HTTPException) as lifecycle:
+                    deploy_app.authorize_service(f"Bearer {token}", "example-portal")
+                self.assertEqual(lifecycle.exception.status_code, 403)
+                with self.assertRaises(deploy_app.HTTPException) as general:
+                    deploy_app.verify_auth(f"Bearer {token}")
+                self.assertEqual(general.exception.status_code, 401)
+
     def test_hashed_and_legacy_token_files_coexist_during_migration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -68,7 +93,7 @@ class ValidationTests(unittest.TestCase):
         payload = deploy_app.healthz()
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["service"], "arcturus-deployer")
-        self.assertEqual(payload["version"], "1.0.0-rc.2")
+        self.assertEqual(payload["version"], "4.0.0-alpha.1")
         self.assertIn("authenticated-preflight", payload["features"])
         self.assertIn("legacy-compose-handoff", payload["features"])
 

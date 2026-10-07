@@ -96,6 +96,30 @@ impl ControlTokenVerifier {
     }
 
     pub fn authorize(&self, authorization: &str, service: &str) -> Result<(), AuthError> {
+        self.authorize_record(authorization, |record| {
+            record_allows_service(record, service)
+        })
+        .map_err(|error| match error {
+            AuthError::ServiceForbidden(_) => AuthError::ServiceForbidden(service.to_owned()),
+            other => other,
+        })
+    }
+
+    pub fn authorize_audience(&self, authorization: &str, audience: &str) -> Result<(), AuthError> {
+        self.authorize_record(authorization, |record| {
+            record_allows_audience(record, audience)
+        })
+        .map_err(|error| match error {
+            AuthError::ServiceForbidden(_) => AuthError::ServiceForbidden(audience.to_owned()),
+            other => other,
+        })
+    }
+
+    fn authorize_record(
+        &self,
+        authorization: &str,
+        allows: impl Fn(&serde_json::Map<String, Value>) -> bool,
+    ) -> Result<(), AuthError> {
         let (_, token) = authorization
             .split_once(' ')
             .filter(|(scheme, token)| scheme.eq_ignore_ascii_case("Bearer") && !token.is_empty())
@@ -137,12 +161,23 @@ impl ControlTokenVerifier {
             if !record_matches(&record, token)? {
                 continue;
             }
-            if record_allows_service(&record, service) {
+            if allows(&record) {
                 return Ok(());
             }
-            return Err(AuthError::ServiceForbidden(service.to_owned()));
+            return Err(AuthError::ServiceForbidden("requested scope".to_owned()));
         }
         Err(AuthError::InvalidControlToken)
+    }
+}
+
+fn record_allows_audience(record: &serde_json::Map<String, Value>, audience: &str) -> bool {
+    match record.get("audiences") {
+        Some(Value::String(value)) => value == audience,
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|value| value == audience),
+        _ => false,
     }
 }
 
@@ -1094,6 +1129,38 @@ mod tests {
             .unwrap();
         assert!(matches!(
             verifier.authorize(&format!("Bearer {token}"), "other-service"),
+            Err(AuthError::ServiceForbidden(_))
+        ));
+    }
+
+    #[test]
+    fn fleet_operator_audience_does_not_grant_lifecycle_scope() {
+        let temp = TempDir::new().unwrap();
+        let token = "fleet-operator-test-token";
+        let salt = b"0123456789abcdef";
+        let params = ScryptParams::new(14, 8, 1, 32).unwrap();
+        let mut hash = [0_u8; 32];
+        scrypt(token.as_bytes(), salt, &params, &mut hash).unwrap();
+        let payload = serde_json::json!({
+            "version": 2,
+            "tokens": [{
+                "id": "fleet-test",
+                "algorithm": "scrypt",
+                "salt": URL_SAFE.encode(salt),
+                "hash": URL_SAFE.encode(hash),
+                "services": [],
+                "audiences": ["fleet-operator"]
+            }]
+        });
+        let path = temp.path().join("tokens.json");
+        fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let verifier = ControlTokenVerifier::new(path);
+        verifier
+            .authorize_audience(&format!("Bearer {token}"), "fleet-operator")
+            .unwrap();
+        assert!(matches!(
+            verifier.authorize(&format!("Bearer {token}"), "stellar-project"),
             Err(AuthError::ServiceForbidden(_))
         ));
     }

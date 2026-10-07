@@ -1,3 +1,13 @@
+---
+title: Security policy
+kind: policy
+lifecycle: stable
+authority: Public vulnerability reporting policy
+summary: Supported security reporting and disclosure process.
+maintenance:
+  - Security support or reporting channels change.
+---
+
 # Security policy
 
 ## Supported versions

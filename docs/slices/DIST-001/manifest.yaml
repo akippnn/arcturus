@@ -1,0 +1,77 @@
+schema: arcturus.delivery/v1
+id: DIST-001
+title: Multi-workload distributed fleet foundation
+state: active
+verdict: pending
+contract:
+  version: v1alpha1
+  state: approved
+  file: contract-v1alpha1.md
+gates:
+  DIST-001-CONTRACT:
+    applicability: required
+    state: pass
+    summary: Rust contracts and Python-derived characteristics agree on canonical
+      fixtures.
+    evidence: evidence/source-implementation.md
+  DIST-001-ORDER:
+    applicability: required
+    state: pass
+    summary: Assignment ordering, conflicts, plural state, restart, and tombstones
+      are deterministic.
+    evidence: evidence/source-implementation.md
+  DIST-001-ISOLATION:
+    applicability: required
+    state: pass
+    summary: Failure of one workload does not change another workload.
+    evidence: evidence/source-implementation.md
+  DIST-001-AUTH:
+    applicability: required
+    state: pass
+    summary: Operator, worker, and service credentials cannot cross boundaries.
+    evidence: evidence/source-implementation.md
+  DIST-001-PLACE:
+    applicability: required
+    state: pass
+    summary: Hard eligibility and refusal reasons are observable without pressure
+      eviction.
+    evidence: evidence/source-implementation.md
+  DIST-001-MOVE:
+    applicability: required
+    state: pass
+    summary: Exact target health precedes source removal and target failure preserves
+      the source.
+    evidence: evidence/source-implementation.md
+  DIST-001-OUTAGE:
+    applicability: required
+    state: pass
+    summary: Cached healthy workloads continue without the control plane.
+    evidence: evidence/hori-arm64-ram-20261006.md
+  DIST-001-CLI:
+    applicability: required
+    state: pass
+    summary: Fleet enrollment, resources, placement, diagnostics, and movement use
+      arcturusctl.
+    evidence: evidence/source-implementation.md
+  DIST-001-PATHS:
+    applicability: required
+    state: pass
+    summary: Rootless XDG and explicit FHS roots use centralized resolution.
+    evidence: evidence/source-implementation.md
+  DIST-001-HARDWARE:
+    applicability: required
+    state: pending
+    summary: Complete the two-worker arm64 and amd64 owner procedure with imported
+      Redis.
+    evidence: null
+blocker: Single AlmaLinux ARM64 worker passed recovery and outage in RAM; AlmaLinux
+  AMD64 execution, two-worker movement, the existing external Redis/Valkey provider,
+  and owner acceptance remain pending.
+next_gate: DIST-001-HARDWARE
+links:
+  overview: README.md
+  contract: contract-v1alpha1.md
+  runbook: runbook.md
+  evidence:
+  - evidence/source-implementation.md
+  - evidence/hori-arm64-ram-20261006.md

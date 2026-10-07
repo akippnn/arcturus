@@ -30,7 +30,6 @@ function configuredDomain(name: string, fallback?: string): string {
 }
 
 function loadConfig() {
-  const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`;
   const baseDomain = configuredDomain("BASE_DOMAIN");
   const legacyV1Mode = process.env.ARCTURUS_LEGACY_V1_MODE || "enforce";
   if (legacyV1Mode !== "enforce" && legacyV1Mode !== "audit") {
@@ -43,9 +42,9 @@ function loadConfig() {
     baseDomain,
     certDomain: configuredDomain("CERT_DOMAIN", baseDomain),
     apexService: process.env.ARCTURUS_APEX_SERVICE || undefined,
-    registrySocket: process.env.REGISTRY_SOCKET || `${runtimeDir}/arcturus/registry.sock`,
-    busSocket: process.env.BUS_SOCKET || `${runtimeDir}/arcturus/bus.sock`,
-    statusFile: process.env.ROUTER_STATUS_FILE || `${runtimeDir}/arcturus/router-status.json`,
+    registrySocket: requiredEnvironment("REGISTRY_SOCKET"),
+    busSocket: requiredEnvironment("BUS_SOCKET"),
+    statusFile: requiredEnvironment("ROUTER_STATUS_FILE"),
     containerCli: (process.env.CONTAINER_CLI || "podman") as "podman" | "docker",
     legacyV1Mode: legacyV1Mode as "enforce" | "audit",
     allowLegacyNginxExtras: process.env.ARCTURUS_ALLOW_LEGACY_NGINX_EXTRAS === "1",

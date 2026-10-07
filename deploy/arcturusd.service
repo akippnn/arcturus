@@ -6,8 +6,8 @@ Before=arcturus-oci-registry.service
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/arcturus/arcturusd.env
-ExecStart=%h/.local/share/arcturus-deployer/current/arcturusd
+EnvironmentFile=@CONFIG_DIR@/arcturusd.env
+ExecStart="@STATE_DIR@/current/arcturusd"
 Restart=on-failure
 RestartSec=3s
 UMask=0077
@@ -15,7 +15,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.local/share/arcturus-oci-auth
+ReadWritePaths=-"@OCI_AUTH_STATE_DIR@" -"@FLEET_STATE_DIR@" "@RUNTIME_DIR@"
 
 [Install]
 WantedBy=default.target

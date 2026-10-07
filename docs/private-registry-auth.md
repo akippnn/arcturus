@@ -1,3 +1,16 @@
+---
+title: Private registry authentication
+kind: guide
+lifecycle: operational
+authority: External registry compatibility procedure
+summary: Configure credentials for the supported external-registry path.
+maintenance:
+  - Registry authentication or compatibility procedures change.
+nav:
+  section: Reference
+  order: 35
+---
+
 # Private registry authentication
 
 Arcturus pulls application images on the host through the always-on rootless Podman API. CI push credentials are intentionally separate and are never forwarded in a release manifest.
@@ -7,9 +20,10 @@ Arcturus pulls application images on the host through the always-on rootless Pod
 Create a dedicated auth file as the rootless Arcturus service user. Use a pull-only registry account where the registry supports scoped credentials.
 
 ```bash
-mkdir -p "$HOME/.config/arcturus"
+config_dir="$(arcturus_paths.py --get config_dir)"
+mkdir -p "$config_dir"
 umask 077
-authfile="$HOME/.config/arcturus/registry-auth.json"
+authfile="$config_dir/registry-auth.json"
 install -m 0600 /dev/null "$authfile"
 
 printf '%s' "$REGISTRY_TOKEN" |
@@ -25,14 +39,16 @@ Do not place the username or token in a release manifest, command history, syste
 Create the optional host registry environment file:
 
 ```bash
-cat >"$HOME/.config/arcturus/registry.env" <<'EOF_ENV'
-REGISTRY_AUTH_FILE=/home/appsvc/.config/arcturus/registry-auth.json
-ARCTURUS_PRIVATE_REGISTRIES=registry.example.org
-EOF_ENV
-chmod 0600 "$HOME/.config/arcturus/registry.env"
+{
+  printf 'REGISTRY_AUTH_FILE=%s\n' "$authfile"
+  printf 'ARCTURUS_PRIVATE_REGISTRIES=%s\n' 'registry.example.org'
+} >"$config_dir/registry.env"
+chmod 0600 "$config_dir/registry.env"
 ```
 
-Replace `/home/appsvc` and the example registry with the actual rootless service account path and registry host. `REGISTRY_AUTH_FILE` must be an absolute path. Multiple private registries are comma-separated.
+Replace the example registry with the actual registry host.
+`REGISTRY_AUTH_FILE` must be an absolute path. Multiple private registries are
+comma-separated.
 
 The deployer and `arcturus-podman-api.service` load the same optional environment file. Podman consumes `REGISTRY_AUTH_FILE`; Arcturus uses the same path only to confirm that configured private registries have a protected, host-scoped credential entry.
 
@@ -71,10 +87,10 @@ Retries are limited to transport failures and HTTP 5xx responses. Authentication
 
 ```bash
 stat -c '%a %n' \
-  "$HOME/.config/arcturus/registry.env" \
-  "$HOME/.config/arcturus/registry-auth.json"
+  "$config_dir/registry.env" \
+  "$config_dir/registry-auth.json"
 
-REGISTRY_AUTH_FILE="$HOME/.config/arcturus/registry-auth.json" \
+REGISTRY_AUTH_FILE="$config_dir/registry-auth.json" \
   podman pull registry.example.org/team/example@sha256:<digest>
 ```
 

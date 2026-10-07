@@ -1,0 +1,13 @@
+{
+  "name": "delivery-documentation-tooling",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node validate-mermaid.mjs",
+    "test": "node --test test-mermaid.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0",
+    "mermaid": "11.12.0"
+  }
+}

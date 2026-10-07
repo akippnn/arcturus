@@ -1,3 +1,16 @@
+---
+title: OCI upload authorization
+kind: reference
+lifecycle: stable
+authority: OCI grant, verification, and receipt contract
+summary: Upload authorization and artifact acceptance behavior.
+maintenance:
+  - OCI grant, verification, receipt, or eligibility behavior changes.
+nav:
+  section: Reference
+  order: 34
+---
+
 # OCI upload grants, verification, and receipts
 
 Rust `arcturusd` owns the security boundary between a service-scoped deployment token and an accepted Arcturus artifact.

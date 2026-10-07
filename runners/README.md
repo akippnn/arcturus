@@ -1,3 +1,13 @@
+---
+title: GitHub Actions runners
+kind: reference
+lifecycle: stable
+authority: Runner integration boundary
+summary: Security and ownership rules for optional self-hosted runners.
+maintenance:
+  - Runner integration or security boundaries change.
+---
+
 # GitHub Actions runners
 
 Arcturus does not manage GitHub runner registration as part of the public control plane. Prefer GitHub-hosted runners. When a self-hosted runner is necessary, use a dedicated account and isolate Buildah/container storage per job.

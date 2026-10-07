@@ -1,3 +1,13 @@
+---
+title: Legacy Terraform and Compose deploy module
+kind: legacy
+lifecycle: archived
+authority: Historical Terraform module documentation
+summary: Retained behavior of the legacy deployment module.
+maintenance:
+  - No routine maintenance; preserve for historical compatibility.
+---
+
 # Legacy Terraform/Compose deploy module
 
 > **Deprecated:** retained for migration reference only. New releases use the manifest-driven Quadlet control plane.

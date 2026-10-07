@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub const SERVICE_RELEASE_API_VERSION: &str = "arcturus.u128.org/v2";
 pub const SERVICE_RELEASE_KIND: &str = "ServiceRelease";
+pub const FLEET_API_VERSION: &str = "infrastructure.arcturus.dev/v1alpha1";
 pub const MAX_ARTIFACT_UPLOAD_COMPONENTS: usize = 32;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -86,6 +87,8 @@ macro_rules! dns_name_type {
 
 dns_name_type!(ServiceName, "service");
 dns_name_type!(ComponentName, "component");
+dns_name_type!(WorkerId, "worker");
+dns_name_type!(ResourceId, "resource");
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -286,6 +289,352 @@ pub struct ServiceReleaseEnvelope {
     pub kind: String,
     pub metadata: ReleaseMetadata,
     pub spec: Value,
+}
+
+/// Fleet contracts wrap ServiceRelease v2 without interpreting its spec in Rust.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerAttestations {
+    #[serde(default)]
+    pub capabilities: BTreeSet<String>,
+    #[serde(default)]
+    pub topology: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerRegistrationRequest {
+    pub worker_id: WorkerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(flatten)]
+    pub attestations: WorkerAttestations,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerRegistration {
+    pub worker_id: WorkerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub attestations: WorkerAttestations,
+    pub enrolled_at: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerEnrollmentResponse {
+    pub worker: WorkerRegistration,
+    pub credential: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoragePoolInventory {
+    pub pool_id: String,
+    pub total_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerInventory {
+    pub inventory_generation: u64,
+    pub architecture: String,
+    pub operating_system: String,
+    pub logical_cpu_count: u32,
+    pub total_memory_bytes: u64,
+    #[serde(default)]
+    pub storage_pools: Vec<StoragePoolInventory>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerPressure {
+    pub pressure_sequence: u64,
+    pub observed_at: i64,
+    pub available_memory_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_utilization_basis_points: Option<u16>,
+    #[serde(default)]
+    pub storage_free_bytes: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerHeartbeat {
+    pub worker_id: WorkerId,
+    pub agent_instance_id: String,
+    pub inventory: WorkerInventory,
+    pub pressure: WorkerPressure,
+    pub accepted_assignment_set_revision: u64,
+    #[serde(default)]
+    pub accepted_assignments: BTreeMap<ServiceName, u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlacementRequirements {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<WorkerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_total_memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_available_memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub required_capabilities: BTreeSet<String>,
+    #[serde(default)]
+    pub required_topology: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResourceOwnership {
+    Imported,
+    Managed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingPodmanSecretMaterial {
+    pub secret_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceRecord {
+    pub api_version: String,
+    pub kind: String,
+    pub resource_id: ResourceId,
+    pub generation: u64,
+    pub ownership: ResourceOwnership,
+    pub resource_type: String,
+    pub protocol: String,
+    #[serde(default)]
+    pub binding_material: BTreeMap<String, ExistingPodmanSecretMaterial>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceProjection {
+    pub material: String,
+    pub component: ComponentName,
+    pub secret_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceBinding {
+    pub name: String,
+    pub resource_id: ResourceId,
+    pub resource_generation: u64,
+    #[serde(default)]
+    pub projections: Vec<ResourceProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseSecretUse {
+    pub component: ComponentName,
+    pub secret_name: String,
+    pub secret_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseCharacteristics {
+    pub service_name: ServiceName,
+    pub release_digest: Sha256Digest,
+    #[serde(default)]
+    pub component_modes: BTreeSet<String>,
+    pub read_only_local_volumes: u32,
+    pub writable_local_volumes: u32,
+    pub has_legacy_migration: bool,
+    #[serde(default)]
+    pub secret_uses: Vec<ReleaseSecretUse>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Movability {
+    Movable,
+    Fixed,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OverlapSafety {
+    Safe,
+    Unsafe,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthoritativeState {
+    NoneOrExternal,
+    ReconstructableLocal,
+    NodeLocal,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RequirementState {
+    NotRequired,
+    Required,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TransitionClaim {
+    DuplicateExecutionSafe,
+    LocalStateReconstructable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransitionAttestation {
+    pub claims: BTreeSet<TransitionClaim>,
+    pub rationale: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransitionPolicy {
+    pub movability: Movability,
+    pub overlap: OverlapSafety,
+    pub authoritative_state: AuthoritativeState,
+    pub migration: RequirementState,
+    pub fencing: RequirementState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<TransitionAttestation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadIntent {
+    pub api_version: String,
+    pub kind: String,
+    pub workload_name: ServiceName,
+    pub intent_generation: u64,
+    pub release: ServiceReleaseEnvelope,
+    pub release_digest: Sha256Digest,
+    pub release_characteristics: ReleaseCharacteristics,
+    pub placement: PlacementRequirements,
+    pub transition: TransitionPolicy,
+    #[serde(default)]
+    pub resource_bindings: Vec<ResourceBinding>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateEvaluation {
+    pub worker_id: WorkerId,
+    pub eligible: bool,
+    #[serde(default)]
+    pub refusal_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlacementDecision {
+    pub decision_id: String,
+    pub workload_name: ServiceName,
+    pub intent_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_worker_id: Option<WorkerId>,
+    pub status: String,
+    #[serde(default)]
+    pub candidates: Vec<CandidateEvaluation>,
+    #[serde(default)]
+    pub transition_reasons: Vec<String>,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum WorkerAssignmentAction {
+    EnsurePresent {
+        release: ServiceReleaseEnvelope,
+        release_digest: Sha256Digest,
+        #[serde(default)]
+        resource_bindings: Vec<ResourceBinding>,
+    },
+    EnsureAbsent,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerAssignment {
+    pub assignment_id: String,
+    pub worker_id: WorkerId,
+    pub workload_name: ServiceName,
+    pub assignment_generation: u64,
+    pub intent_generation: u64,
+    pub placement_decision_id: String,
+    pub issued_at: i64,
+    #[serde(flatten)]
+    pub desired: WorkerAssignmentAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerAssignmentSet {
+    pub worker_id: WorkerId,
+    pub revision: u64,
+    pub changed: bool,
+    #[serde(default)]
+    pub assignments: Vec<WorkerAssignment>,
+    pub poll_after_seconds: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ObservedPhase {
+    Pending,
+    Reconciling,
+    Healthy,
+    Degraded,
+    Failed,
+    Absent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedState {
+    pub worker_id: WorkerId,
+    pub workload_name: ServiceName,
+    pub assignment_generation: u64,
+    pub observation_sequence: u64,
+    pub observed_at: i64,
+    pub phase: ObservedPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_digest: Option<Sha256Digest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+    #[serde(default)]
+    pub units: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ObservedError>,
 }
 
 impl ServiceReleaseEnvelope {

@@ -1,0 +1,25 @@
+{
+  "environment": {
+    "HOME": "/var/lib/arcturus",
+    "ARCTURUS_CONFIG_ROOT": "/etc",
+    "ARCTURUS_DATA_ROOT": "/var/lib",
+    "ARCTURUS_CACHE_ROOT": "/var/cache",
+    "ARCTURUS_RUNTIME_ROOT": "/run",
+    "ARCTURUS_BIN_DIR": "/usr/bin",
+    "ARCTURUS_WORKLOAD_ROOT": "/srv/arcturus-workloads"
+  },
+  "expected": {
+    "config_dir": "/etc/arcturus",
+    "deployer_state_dir": "/var/lib/arcturus-deployer",
+    "fleet_state_dir": "/var/lib/arcturus-fleet",
+    "agent_state_dir": "/var/lib/arcturus-agent",
+    "oci_auth_state_dir": "/var/lib/arcturus-oci-auth",
+    "oci_registry_state_dir": "/var/lib/arcturus-registry",
+    "cache_dir": "/var/cache/arcturus",
+    "runtime_dir": "/run/arcturus",
+    "systemd_dir": "/etc/systemd/user",
+    "quadlet_dir": "/etc/containers/systemd/arcturus",
+    "bin_dir": "/usr/bin",
+    "workload_root": "/srv/arcturus-workloads"
+  }
+}

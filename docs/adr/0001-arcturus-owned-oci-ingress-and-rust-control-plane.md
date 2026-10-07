@@ -1,3 +1,15 @@
+---
+title: "ADR 0001: Arcturus-owned OCI ingress and Rust control plane"
+kind: adr
+lifecycle: immutable
+authority: Arcturus-owned OCI ingress and incremental Rust migration decision
+summary: GitHub remains release authority while Arcturus owns OCI ingress and incrementally moves control-plane responsibilities to Rust.
+maintenance:
+  - Never edit after capture; supersede with a new ADR.
+id: ADR-0001
+status: accepted
+---
+
 # ADR 0001: Arcturus-owned OCI ingress and Rust control plane
 
 - Status: Accepted

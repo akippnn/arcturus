@@ -1,0 +1,26 @@
+{
+  "apiVersion": "arcturus.u128.org/v2",
+  "kind": "ServiceRelease",
+  "metadata": {
+    "name": "dist-redis-client",
+    "revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "spec": {
+    "components": {
+      "client": {
+        "image": "docker.io/library/redis@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "secrets": [
+          {
+            "name": "dist-redis-url",
+            "type": "env",
+            "target": "REDIS_URL"
+          }
+        ]
+      }
+    },
+    "deployment": {
+      "timeoutSeconds": 300,
+      "rollbackOnFailure": true
+    }
+  }
+}

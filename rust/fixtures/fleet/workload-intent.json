@@ -1,0 +1,101 @@
+{
+  "apiVersion": "infrastructure.arcturus.dev/v1alpha1",
+  "kind": "WorkloadIntent",
+  "workloadName": "dist-redis-client",
+  "intentGeneration": 1,
+  "release": {
+    "apiVersion": "arcturus.u128.org/v2",
+    "kind": "ServiceRelease",
+    "metadata": {
+      "name": "dist-redis-client",
+      "revision": "0123456789abcdef0123456789abcdef01234567"
+    },
+    "spec": {
+      "components": {
+        "client": {
+          "command": [
+            "sh",
+            "-c",
+            "while redis-cli -u \"$REDIS_URL\" --no-auth-warning ping; do sleep 5; done; exit 1"
+          ],
+          "dependsOn": [],
+          "environment": {},
+          "image": "docker.io/library/redis@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "healthCheck": {
+            "command": "redis-cli -u \"$REDIS_URL\" --no-auth-warning ping",
+            "interval": "10s",
+            "retries": 3,
+            "startPeriod": "5s",
+            "timeout": "3s"
+          },
+          "mode": "service",
+          "networks": ["internal_routing"],
+          "ports": [],
+          "restart": "always",
+          "secrets": [
+            {
+              "name": "dist-redis-url",
+              "target": "REDIS_URL",
+              "type": "env"
+            }
+          ],
+          "volumes": []
+        }
+      },
+      "deployment": {
+        "rollbackOnFailure": true,
+        "timeoutSeconds": 300
+      },
+      "networks": [
+        {
+          "external": true,
+          "name": "internal_routing"
+        }
+      ],
+      "routing": {}
+    }
+  },
+  "releaseDigest": "sha256:ed06091824bcec5bc175eddb8abd1fd69881229420da103d777ac63c2b628328",
+  "releaseCharacteristics": {
+    "serviceName": "dist-redis-client",
+    "releaseDigest": "sha256:ed06091824bcec5bc175eddb8abd1fd69881229420da103d777ac63c2b628328",
+    "componentModes": ["service"],
+    "readOnlyLocalVolumes": 0,
+    "writableLocalVolumes": 0,
+    "hasLegacyMigration": false,
+    "secretUses": [
+      {
+        "component": "client",
+        "secretName": "dist-redis-url",
+        "secretType": "env",
+        "target": "REDIS_URL"
+      }
+    ]
+  },
+  "placement": {
+    "architecture": "amd64",
+    "requiredCapabilities": [],
+    "requiredTopology": {}
+  },
+  "transition": {
+    "movability": "movable",
+    "overlap": "safe",
+    "authoritativeState": "noneOrExternal",
+    "migration": "notRequired",
+    "fencing": "notRequired"
+  },
+  "resourceBindings": [
+    {
+      "name": "cache",
+      "resourceId": "dist-redis",
+      "resourceGeneration": 1,
+      "projections": [
+        {
+          "material": "url",
+          "component": "client",
+          "secretName": "dist-redis-url"
+        }
+      ]
+    }
+  ]
+}

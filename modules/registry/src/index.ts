@@ -1,21 +1,27 @@
 // src/index.ts - Registry module entry point
 
 import { unlinkSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { dirname } from "node:path";
 import { StackRegistry } from "./registry.js";
 import { createAPIServer } from "./api.js";
 import { BusClient } from "./bus-client.js";
 
-const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`;
-const SOCKET_PATH = process.env.REGISTRY_SOCKET || `${runtimeDir}/arcturus/registry.sock`;
-const BUS_SOCKET = process.env.BUS_SOCKET || `${runtimeDir}/arcturus/bus.sock`;
-const STACKS_DIR = process.env.STACKS_DIR || `${homedir()}/stacks`;
-const ACTIVE_MANIFESTS_DIR = process.env.ACTIVE_MANIFESTS_DIR
-  || `${homedir()}/.local/share/arcturus-deployer/active-manifests`;
+function requiredPath(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} must be supplied by the canonical Arcturus layout`);
+  }
+  return value;
+}
+
+const SOCKET_PATH = requiredPath("REGISTRY_SOCKET");
+const BUS_SOCKET = requiredPath("BUS_SOCKET");
+const STACKS_DIR = requiredPath("STACKS_DIR");
+const ACTIVE_MANIFESTS_DIR = requiredPath("ACTIVE_MANIFESTS_DIR");
 
 async function main() {
   // Ensure socket directory exists
-  try { mkdirSync(`${runtimeDir}/arcturus`, { recursive: true }); } catch { /* ignore */ }
+  try { mkdirSync(dirname(SOCKET_PATH), { recursive: true }); } catch { /* ignore */ }
 
   // Clean up old socket
   try { unlinkSync(SOCKET_PATH); } catch { /* ignore */ }

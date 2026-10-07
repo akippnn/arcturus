@@ -18,6 +18,8 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from arcturus_paths import resolve_paths
+
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 NETWORK_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
@@ -403,6 +405,43 @@ class ServiceRelease(BaseModel):
     def digest(self) -> str:
         return "sha256:" + hashlib.sha256(self.canonical_json().encode()).hexdigest()
 
+    def fleet_characteristics(self) -> dict[str, Any]:
+        """Derive the narrow fleet companion from authoritative v2 validation.
+
+        This deliberately describes only transition- and binding-relevant facts;
+        it is not a second ServiceRelease schema.
+        """
+        read_only = 0
+        writable = 0
+        modes: set[str] = set()
+        secret_uses: list[dict[str, Any]] = []
+        for component_name, component in self.spec.components.items():
+            modes.add(component.mode)
+            for volume in component.volumes:
+                if volume.readOnly:
+                    read_only += 1
+                else:
+                    writable += 1
+            for secret in component.secrets:
+                secret_uses.append({
+                    "component": component_name,
+                    "secretName": secret.name,
+                    "secretType": secret.type,
+                    **({"target": secret.target} if secret.target is not None else {}),
+                })
+        return {
+            "serviceName": self.metadata.name,
+            "releaseDigest": self.digest(),
+            "componentModes": sorted(modes),
+            "readOnlyLocalVolumes": read_only,
+            "writableLocalVolumes": writable,
+            "hasLegacyMigration": bool(self.spec.migration and self.spec.migration.legacyCompose),
+            "secretUses": sorted(
+                secret_uses,
+                key=lambda item: (item["component"], item["secretName"], item["secretType"]),
+            ),
+        }
+
 
 class DeploymentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -458,7 +497,7 @@ class CommandRunner:
 class PodmanClient:
     def __init__(self, socket_path: str | None = None):
         if socket_path is None:
-            socket_path = f"/run/user/{os.getuid()}/arcturus/podman.sock"
+            socket_path = str(resolve_paths().runtime_dir / "podman.sock")
         self.socket_path = socket_path
 
     def _client(self, timeout: int) -> httpx.Client:
@@ -1073,19 +1112,19 @@ class ReleaseDeployer:
 
     @classmethod
     def from_environment(cls) -> "ReleaseDeployer":
-        home = Path.home()
+        paths = resolve_paths()
         roots = os.getenv(
             "ARCTURUS_ALLOWED_BIND_ROOTS",
-            str(home / "stacks"),
+            str(paths.workload_root),
         )
         return cls(
-            state_dir=Path(os.getenv("ARCTURUS_STATE_DIR", home / ".local/share/arcturus-deployer")),
-            quadlet_dir=Path(os.getenv("ARCTURUS_QUADLET_DIR", home / ".config/containers/systemd/arcturus")),
-            systemd_dir=Path(os.getenv("ARCTURUS_SYSTEMD_DIR", home / ".config/systemd/user")),
+            state_dir=paths.deployer_state_dir,
+            quadlet_dir=paths.quadlet_dir,
+            systemd_dir=paths.systemd_dir,
             active_manifest_dir=Path(
                 os.getenv(
                     "ARCTURUS_ACTIVE_MANIFEST_DIR",
-                    home / ".local/share/arcturus-deployer/active-manifests",
+                    paths.deployer_state_dir / "active-manifests",
                 )
             ),
             route_status_file=(

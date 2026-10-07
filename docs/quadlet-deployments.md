@@ -1,3 +1,16 @@
+---
+title: Manifest-driven Quadlet deployments
+kind: reference
+lifecycle: stable
+authority: Quadlet rendering and activation behavior
+summary: How ServiceRelease manifests become Podman and systemd units.
+maintenance:
+  - Quadlet rendering, activation, or rollback behavior changes.
+nav:
+  section: Reference
+  order: 32
+---
+
 # Manifest-driven Quadlet deployments
 
 This document describes the mechanics behind the current Arcturus release path. For the field-by-field contract, see [Manifest reference](manifest-reference.md).

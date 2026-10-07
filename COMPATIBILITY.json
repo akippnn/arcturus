@@ -1,7 +1,7 @@
 {
     "schemaVersion": 1,
     "product": "arcturus",
-    "productVersion": "1.0.0-rc.2",
+    "productVersion": "4.0.0-alpha.1",
     "manifestApis": [
         "arcturus.u128.org/v1",
         "arcturus.u128.org/v2"
@@ -19,6 +19,8 @@
         "manifest-v1-provenance-routing",
         "legacy-v1-service-scoped-deploy",
         "gitea-and-github-ci-compatible",
-        "almalinux-9.8-and-10.2-hosts"
+        "almalinux-9.8-and-10.2-hosts",
+        "xdg-fhs-four-root-layout",
+        "dist-001-multi-workload-fleet-foundation"
     ]
 }

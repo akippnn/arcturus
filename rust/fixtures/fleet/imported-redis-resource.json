@@ -1,0 +1,14 @@
+{
+  "apiVersion": "infrastructure.arcturus.dev/v1alpha1",
+  "kind": "Resource",
+  "resourceId": "dist-redis",
+  "generation": 1,
+  "ownership": "imported",
+  "resourceType": "redis",
+  "protocol": "resp",
+  "bindingMaterial": {
+    "url": {
+      "secretName": "dist-redis-url"
+    }
+  }
+}

@@ -1,3 +1,13 @@
+---
+title: Contributing to Arcturus
+kind: guide
+lifecycle: operational
+authority: Contribution workflow
+summary: Development, validation, and contribution requirements.
+maintenance:
+  - Contributor workflow or required checks change.
+---
+
 # Contributing
 
 Arcturus welcomes focused changes that preserve the single-host, manifest-driven design.
